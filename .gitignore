@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables (may contain API keys)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project-local config and generated session analysis reports
+/.microcode/
+
+# Bun
+bun.lockb
+
+# Python
+__pycache__/
+*.py[cod]
+
+# coding agent
+.claude
+.agents
+.codex
+
+# playwright-cli 
+.playwright-cli/
