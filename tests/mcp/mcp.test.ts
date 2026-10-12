@@ -5,6 +5,7 @@ import { join } from 'path'
 import { addMcpServer, getScopeDescription, listMcpServers, parseEnvVars, parseHeaders, removeMcpServer } from '../../src/mcp/configWrite.ts'
 import { isMcpConfigEmpty, loadMcpConfig } from '../../src/mcp/config.ts'
 import { getMcpInstructionsSection } from '../../src/mcp/prompt.ts'
+import { McpClientManager } from '../../src/mcp/client.ts'
 import type { McpServerState } from '../../src/mcp/types.ts'
 
 async function tempProject(): Promise<string> {
@@ -86,5 +87,24 @@ describe('mcp modules', () => {
     expect(prompt).toContain('select:<exact_tool_name>')
     expect(prompt).toContain('file://a')
     expect(prompt).not.toContain('"required"')
+  })
+
+  test('preserves a disabled server during config reconciliation and retries only on an explicit enable', async () => {
+    const manager = new McpClientManager()
+    const failingConfig = { command: process.execPath, args: ['-e', 'process.exit(0)'] }
+    try {
+      await manager.connectServer('sample-server', failingConfig)
+      expect(manager.getServer('sample-server')?.status).toBe('failed')
+      expect(await manager.setServerEnabled('sample-server', false)).toBe(true)
+
+      const updatedConfig = { command: process.execPath, args: ['-e', 'process.exit(0)'], cwd: process.cwd() }
+      await manager.connectServer('sample-server', updatedConfig)
+      expect(manager.getServer('sample-server')).toMatchObject({ status: 'disabled', config: updatedConfig })
+
+      expect(await manager.setServerEnabled('sample-server', true)).toBe(true)
+      expect(manager.getServer('sample-server')?.status).toBe('failed')
+    } finally {
+      await manager.disconnectAll()
+    }
   })
 })

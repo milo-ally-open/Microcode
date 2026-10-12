@@ -140,6 +140,23 @@ export class PermissionManager {
     })
   }
 
+  /** Replace this policy with an immutable parent snapshot plus caller-specific denies. */
+  inheritFrom(
+    snapshot: Readonly<PermissionSnapshot>,
+    extraDeny: readonly PermissionRuleValue[] = [],
+    updateMode = true,
+  ): void {
+    this.context = {
+      mode: updateMode ? snapshot.mode : this.context.mode,
+      allowRules: snapshot.allowRules.map((rule) => ({ ...rule })),
+      denyRules: [
+        ...snapshot.denyRules.map((rule) => ({ ...rule })),
+        ...extraDeny.map((rule) => ({ ...rule, behavior: 'deny' as const, source: 'inherited' as const })),
+      ],
+      askRules: snapshot.askRules.map((rule) => ({ ...rule })),
+    }
+  }
+
   getContext(): ToolPermissionContext {
     return {
       mode: this.context.mode,

@@ -1,0 +1,16 @@
+{
+  "bun": {
+    "version": "1.3.14",
+    "archive": "bun-windows-x64.zip",
+    "sha256": "0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922",
+    "licenseFile": "BUN-LICENSE.md",
+    "licenseSha256": "2c6160ec8fb853f7e8f97d9b249e756c9b0ac44860a68b6bf4f1b0bcbc5c3741",
+    "download": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip"
+  },
+  "gitForWindows": {
+    "version": "2.54.0.windows.1",
+    "archive": "PortableGit-2.54.0-64-bit.7z.exe",
+    "sha256": "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+    "download": "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
+  }
+}

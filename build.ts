@@ -62,7 +62,21 @@ function renderBar(ratio: number): string {
 const PROJECT_DIR = import.meta.dir
 const IS_WINDOWS = process.platform === 'win32'
 const BINARY_NAME = IS_WINDOWS ? 'microcode.exe' : 'microcode'
-const COMPILED_BINARY = path.join(PROJECT_DIR, 'dist', BINARY_NAME)
+const outputArgumentIndex = process.argv.indexOf('--out')
+const outputArgument = outputArgumentIndex >= 0 ? process.argv[outputArgumentIndex + 1] : undefined
+if (outputArgumentIndex >= 0 && (!outputArgument || outputArgument.startsWith('--'))) {
+  throw new Error('--out requires a file path.')
+}
+const targetArgumentIndex = process.argv.indexOf('--target')
+const targetArgument = targetArgumentIndex >= 0
+  ? process.argv[targetArgumentIndex + 1]
+  : process.argv.find((argument) => argument.startsWith('--target='))?.slice('--target='.length)
+if (targetArgumentIndex >= 0 && (!targetArgument || targetArgument.startsWith('--'))) {
+  throw new Error('--target requires a Bun compilation target.')
+}
+const COMPILED_BINARY = outputArgument
+  ? path.resolve(PROJECT_DIR, outputArgument)
+  : path.join(PROJECT_DIR, 'dist', BINARY_NAME)
 
 function getInstallDir(): string {
   if (IS_WINDOWS) {
@@ -105,7 +119,7 @@ async function compileBinary(outputPath: string): Promise<StepResult> {
   let startTime = Date.now()
 
   const proc = Bun.spawn({
-    cmd: ['bun', 'build', './src/entry.ts', '--compile', '--outfile=' + outputPath],
+    cmd: ['bun', 'build', './src/entry.ts', '--compile', ...(targetArgument ? [`--target=${targetArgument}`] : []), '--outfile=' + outputPath],
     cwd: PROJECT_DIR,
     stdout: 'pipe',
     stderr: 'pipe',

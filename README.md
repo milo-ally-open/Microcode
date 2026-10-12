@@ -42,6 +42,7 @@
 - [MCP servers](#mcp-servers)
 - [Permissions](#permissions)
 - [Sessions](#sessions)
+- [ACP agent](#acp-agent)
 - [Release packages](#release-packages)
 
 ## Requirements
@@ -372,6 +373,26 @@ Review tool requests and permission prompts before approving them, especially wh
 ## Sessions
 
 Sessions are stored locally under `~/.microcode/sessions/`. `microcode --resume` opens the latest session for the current working directory; `microcode --resume <id-prefix>` opens a matching session. Resumed messages are rendered in the conversation immediately and can be browsed with the mouse wheel or PageUp/PageDown. Use `/session` to choose from saved sessions or `/new` to begin another conversation.
+
+## ACP agent
+
+Microcode can run as an ACP v1 Agent subprocess for Zed and other ACP Clients. The Client starts Microcode; Microcode keeps its existing model, authentication, tools, MCP configuration, session storage, and permission policy. Interactive approval is the default. The ACP adapter uses stdio JSON-RPC, writes protocol messages only to stdout, and writes diagnostics to stderr.
+
+Add a custom agent to Zed's `settings.json` under `agent_servers`:
+
+```json
+{
+  "agent_servers": {
+    "Microcode": {
+      "type": "custom",
+      "command": "microcode",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Zed's process must be able to find `microcode` on `PATH`. To select a model or adjust permissions, add CLI arguments such as `"--model", "openai-codex/gpt-5.6-luna"` or `"--permission", "plan"` to `args`. Add `"--no-daemon"` to use the in-process model path. ACP sessions can resume Microcode sessions using `session/load`; clients can approve a tool once or for the session. The adapter advertises image prompts and stdio, HTTP, and SSE MCP transports. It does not advertise client filesystem, terminal, audio, embedded-resource, or additional-workspace-root features.
 
 To analyze an exported session's user turns, tool outcomes, token usage, and trajectory, install Matplotlib and run:
 

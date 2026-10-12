@@ -23,7 +23,7 @@ export class FooterComponent implements Component {
   private readonly gitBranch: GitBranchReader
 
   constructor(
-    private readonly agent: MicrocodeAgent,
+    private readonly agent: Pick<MicrocodeAgent, 'getSnapshot'>,
     private readonly cwd: string,
   ) {
     this.gitBranch = new GitBranchReader(cwd)

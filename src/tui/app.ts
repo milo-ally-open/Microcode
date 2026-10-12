@@ -63,7 +63,8 @@ import { exportSessionJsonl } from '../session/exportSession.ts'
 import { DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES, loadProjectInstructions } from '../instructions/projectInstructions.ts'
 import { buildInitTaskPrompt, extractInitDraft, getInitProjectFileOutline } from '../instructions/initProjectGuidance.ts'
 import { readMicroFile, writeMicroFile, type MicroFileSnapshot } from '../instructions/writeMicroFile.ts'
-import type { MicrocodeAgent, MicrocodeAgentEvent } from '../agent/index.ts'
+import { MicrocodeAgent, type MicrocodeAgentEvent } from '../agent/index.ts'
+import type { TuiAgentClient, TuiMcpClient, TuiPluginManager, TuiSessionManager } from '../runtime/index.ts'
 import { type PermissionMode, PERMISSION_MODES } from '../permissions/index.ts'
 import type { TaskList } from '../tasks/TaskSystem.ts'
 import { MultiSelectList, type MultiSelectItem } from './components/multiSelectList.ts'
@@ -199,7 +200,7 @@ export class App {
   private statusContainer: Container
   private editorContainer: Container
   private workingContainer: Container
-  private agent: MicrocodeAgent
+  private agent: MicrocodeAgent | TuiAgentClient
   private editor!: MicrocodeEditor
   private footer: FooterComponent
   private appLayout!: AppLayout
@@ -217,14 +218,14 @@ export class App {
   private toolElapsedTimer?: ReturnType<typeof setInterval>
   private agentWorking = false
   private lastSigintTime = 0
-  private mcpClient?: McpClientManager
-  private queuedMcpClient?: McpClientManager
-  private pluginManager?: PluginManager
+  private mcpClient?: McpClientManager | TuiMcpClient
+  private queuedMcpClient?: McpClientManager | TuiMcpClient
+  private pluginManager?: PluginManager | TuiPluginManager
   private onPluginsChanged?: (snapshot?: PluginSnapshot) => Promise<void>
   private pluginDiscoveryRefresh?: Promise<PluginSnapshot>
   private pluginDiscoveryRefreshedAt = 0
   private pluginRuntimeRefreshPending = false
-  private sessionManager: SessionManager
+  private sessionManager: SessionManager | TuiSessionManager
   private compacting = false
   private permissionPromptActive = false
   private pendingEventsWhilePermission: Array<() => void> = []
@@ -255,9 +256,9 @@ export class App {
   onExit?: () => void | Promise<void>
 
   constructor(
-    agent: MicrocodeAgent,
-    mcpClient?: McpClientManager,
-    sessionManager?: SessionManager,
+    agent: MicrocodeAgent | TuiAgentClient,
+    mcpClient?: McpClientManager | TuiMcpClient,
+    sessionManager?: SessionManager | TuiSessionManager,
     modelCompletion?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => Promise<AssistantMessage>,
     modelCatalog?: { getProjectModels(): readonly Model<Api>[] },
     modelAuth?: GatewayAuthControl,
@@ -270,7 +271,7 @@ export class App {
     this.modelCatalog = modelCatalog
     this.modelAuth = modelAuth
     this.gatewayBindControl = gatewayBindControl
-    this.agent.setPersistence(this.sessionManager)
+    if (agent instanceof MicrocodeAgent) this.agent.setPersistence(this.sessionManager as SessionManager)
     this.ui = new TUI(new ProcessTerminal())
     // Clear stale rows when a long injected prompt disappears; otherwise Windows consoles can retain it below the footer.
     this.ui.setClearOnShrink(true)
@@ -281,15 +282,19 @@ export class App {
     this.workingContainer = new Container()
     this.footer = new FooterComponent(
       agent,
-      process.cwd(),
+      agent.getSnapshot().cwd,
     )
   }
 
-  getSessionManager(): SessionManager {
+  private get cwd(): string {
+    return this.agent.getSnapshot().cwd
+  }
+
+  getSessionManager(): SessionManager | TuiSessionManager {
     return this.sessionManager
   }
 
-  setPluginManager(manager: PluginManager, onChanged: (snapshot?: PluginSnapshot) => Promise<void>): void {
+  setPluginManager(manager: PluginManager | TuiPluginManager, onChanged: (snapshot?: PluginSnapshot) => Promise<void> = async () => {}): void {
     this.pluginManager = manager
     this.onPluginsChanged = onChanged
   }
@@ -374,7 +379,7 @@ export class App {
           for (const filePath of imagePaths) {
             const image = tryReadImageFromPath(filePath)
             if (image) {
-              await this.sessionManager.ensureCreated(process.cwd())
+              await this.sessionManager.ensureCreated(this.cwd)
               const sessionId = this.sessionManager.getSessionId() ?? 'unknown'
               const { cachePath, fileName } = storeImage(image.data, image.mimeType, sessionId)
               this.pendingImages.push({ cachePath, fileName, mimeType: image.mimeType, base64Data: image.data })
@@ -394,7 +399,7 @@ export class App {
       // Skip if nothing to send (no text and no images)
       const images = this.getPendingImageContents()
       if (!userInput.trim() && images.length === 0) continue
-      await this.sessionManager.ensureCreated(process.cwd())
+      await this.sessionManager.ensureCreated(this.cwd)
       if (!this.titleGenerated && this.firstUserInputForTitle === undefined &&
         !this.agent.getMessages().some((message) => message.role === 'user')) {
         this.firstUserInputForTitle = userInput
@@ -798,7 +803,7 @@ export class App {
 
       await new Promise<void>((resolve) => {
         const child = spawn(shell, [...args, command], {
-          cwd: process.cwd(),
+          cwd: this.cwd,
           detached: process.platform !== 'win32',
           stdio: 'pipe',
           windowsHide: true,
@@ -1015,7 +1020,7 @@ export class App {
         return
       }
 
-      const destinationPath = await exportSessionJsonl(metadata.path, process.cwd(), metadata.id)
+      const destinationPath = await exportSessionJsonl(metadata.path, this.cwd, metadata.id)
       this.showStatus(`Conversation exported to ${destinationPath}`)
     } catch (error) {
       this.showError(`Could not export conversation: ${error instanceof Error ? error.message : String(error)}`)
@@ -1028,7 +1033,7 @@ export class App {
       return
     }
 
-    const cwd = process.cwd()
+    const cwd = this.cwd
     let before: MicroFileSnapshot
     try {
       before = await readMicroFile(cwd)
@@ -1054,6 +1059,7 @@ export class App {
 
     const messageCountBeforeInit = this.agent.getMessages().length
     let promptError: unknown
+    let proposal: string | undefined
     try {
       await this.agent.promptReadOnly(buildInitTaskPrompt(cwd, fileOutline))
     } catch (error) {
@@ -1070,7 +1076,7 @@ export class App {
         .find((message): message is AssistantMessage => message.role === 'assistant')
       const response = latestAssistant?.content
         .reduce((text, block) => block.type === 'text' ? `${text}${block.text}\n` : text, '') ?? ''
-      const proposal = extractInitDraft(response)
+      proposal = extractInitDraft(response)
       if (proposal === undefined) {
         this.showError('The project analysis did not return a complete MICRO.md proposal. No files were changed.')
         return
@@ -1147,7 +1153,7 @@ export class App {
         return
       }
       try {
-        const instructions = await loadProjectInstructions(process.cwd())
+        const instructions = await loadProjectInstructions(this.cwd)
         this.agent.updateProjectInstructions(instructions)
         this.showStatus(`Reloaded project instructions (${instructions.files.length} files, ${instructions.totalBytes} bytes).`)
         for (const diagnostic of instructions.diagnostics) {
@@ -1288,7 +1294,7 @@ export class App {
     const currentHost = control.getBindHost()
     const addresses = [...new Set(Object.values(networkInterfaces()).flatMap((entries) =>
       (entries ?? [])
-        .filter((entry) => !entry.internal && (entry.family === 'IPv4' || entry.family === 4))
+        .filter((entry) => !entry.internal && (entry.family === 'IPv4' || String(entry.family) === '4'))
         .map((entry) => entry.address)))]
     const choices: SelectItem[] = [
       { value: '127.0.0.1', label: 'Loopback · 127.0.0.1', description: 'Only accept connections from this computer' },
@@ -2092,7 +2098,7 @@ export class App {
 
   private async handleNewSession(): Promise<void> {
     await this.agent.persistMessages()
-    this.sessionManager.beginDraft(process.cwd())
+    this.sessionManager.beginDraft(this.cwd)
 
     // Reset state
     this.agent.clearMessages()
@@ -2264,7 +2270,7 @@ export class App {
       const term = searchTerm.trim()
       const exact = allModels.filter((model) => `${model.provider}/${model.id}` === term || model.id === term)
       if (exact.length === 1) {
-        this.switchModel(`${exact[0]!.provider}/${exact[0]!.id}`)
+        await this.switchModel(`${exact[0]!.provider}/${exact[0]!.id}`)
         return
       }
       this.showModelChoices(allModels.filter((model) =>
@@ -2375,9 +2381,7 @@ export class App {
       this.chatContainer.removeChild(selectList)
       this.chatContainer.removeChild(titleText)
 
-      if (selectedValue) {
-        this.switchModel(selectedValue)
-      }
+      if (selectedValue) void this.switchModel(selectedValue)
 
       this.chatContainer.addChild(new Spacer(1))
       this.ui.setFocus(this.editor)
@@ -2394,12 +2398,12 @@ export class App {
   }
 
   /** Switch to a model by ID and update all dependent state. */
-  private switchModel(modelId: string, api?: Api): void {
+  private async switchModel(modelId: string, api?: Api): Promise<void> {
     try {
       const slash = modelId.indexOf('/')
       const provider = slash > 0 ? modelId.slice(0, slash) : undefined
       const id = provider ? modelId.slice(slash + 1) : modelId
-      const snapshot = this.agent.switchModel(id, api, provider)
+      const snapshot = await this.agent.switchModel(id, api, provider)
       const model = snapshot.model
 
       // Clear image state on model switch
@@ -2430,11 +2434,15 @@ export class App {
     try {
       if (this.agent.isBusy()) {
         this.showStatus('MCP runtime refresh will be applied after the active turn finishes.')
-        await this.pluginManager?.refresh()
+      }
+      await this.pluginManager?.refresh()
+      if ('refreshCapabilities' in mcpClient) {
+        const refreshed = await mcpClient.refreshCapabilities()
+        for (const warning of refreshed.diagnostics) this.addStartupWarning(warning)
       } else {
         await this.onPluginsChanged?.()
       }
-      registry = await discoverMcpCapabilities(process.cwd())
+      registry = await discoverMcpCapabilities(this.cwd)
     } catch (error) {
       this.showError(`Could not discover MCP servers: ${error instanceof Error ? error.message : String(error)}`)
       return
@@ -2525,7 +2533,7 @@ export class App {
     this.agent.updateMcpServers(mcpServers)
   }
 
-  updateMcpState(mcpClient: McpClientManager): void {
+  updateMcpState(mcpClient: McpClientManager | TuiMcpClient): void {
     this.mcpClient = mcpClient
     if (this.agent.isBusy()) {
       this.queuedMcpClient = mcpClient
@@ -2535,8 +2543,9 @@ export class App {
     this.applyMcpState(mcpClient)
   }
 
-  private applyMcpState(mcpClient: McpClientManager): void {
-    this.agent.configureMcpTools(mcpClient)
+  private applyMcpState(mcpClient: McpClientManager | TuiMcpClient): void {
+    if (this.agent instanceof MicrocodeAgent) this.agent.configureMcpTools(mcpClient as McpClientManager)
+    else this.agent.configureMcpTools(mcpClient)
     this.rebuildSystemPrompt(mcpClient.getServerStates())
   }
 
@@ -2917,7 +2926,7 @@ export class App {
 
     let repository: GitRepository
     try {
-      repository = await GitRepository.open(process.cwd())
+      repository = await GitRepository.open(this.cwd)
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error))
       return

@@ -108,6 +108,31 @@ describe('plugin packages', () => {
     }
   })
 
+  test('keeps an invalid package off and refuses to enable it through the plugin manager', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'microcode-plugin-invalid-toggle-'))
+    try {
+      const cwd = join(dir, 'project')
+      const userRoot = join(dir, 'user-plugins')
+      const pluginRoot = join(userRoot, 'directory-name')
+      const userConfig = join(dir, 'user-config.json')
+      await mkdir(pluginRoot, { recursive: true })
+      await writeFile(join(pluginRoot, 'plugin.json'), JSON.stringify({
+        name: 'different-name',
+        version: '1.0.0',
+        description: 'Invalid package',
+      }))
+
+      const manager = await PluginManager.create(cwd, '0.1.0', { userPluginsDir: userRoot, userConfigPath: userConfig })
+      const plugin = manager.findPlugin('directory-name')
+      expect(plugin).toMatchObject({ valid: false, health: 'invalid', enabled: false })
+      await expect(manager.setEnabled('directory-name', true)).rejects.toThrow('is invalid and cannot be enabled')
+      expect(manager.findPlugin('directory-name')?.enabled).toBe(false)
+      expect(await Bun.file(userConfig).exists()).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('does not overwrite a malformed existing config while changing plugin settings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'microcode-plugin-bad-config-'))
     try {

@@ -14,7 +14,12 @@ export class McpClientManager {
   private clients = new Map<string, Client>()
   private operationIds = new Map<string, number>()
 
-  async connectServer(name: string, config: McpServerConfig): Promise<void> {
+  async connectServer(name: string, config: McpServerConfig, options: { readonly force?: boolean } = {}): Promise<void> {
+    const existingState = this.servers.get(name)
+    if (existingState?.status === 'disabled' && options.force !== true) {
+      existingState.config = config
+      return
+    }
     const operationId = (this.operationIds.get(name) ?? 0) + 1
     this.operationIds.set(name, operationId)
     const existing = this.clients.get(name)
@@ -155,29 +160,30 @@ export class McpClientManager {
     return this.servers.delete(name)
   }
 
-  setServerEnabled(name: string, enabled: boolean): boolean {
+  async setServerEnabled(name: string, enabled: boolean): Promise<boolean> {
     const server = this.servers.get(name)
     if (!server) return false
 
     if (enabled) {
-      if (server.status === 'disabled') {
-        // Reconnect
-        void this.connectServer(name, server.config)
-        return true
+      if (server.status === 'disabled' || server.status === 'failed' || server.status === 'disconnected') {
+        await this.connectServer(name, server.config, { force: true })
       }
+      return true
     } else {
-      // Disconnect and mark as disabled
+      if (server.status === 'disabled') return true
+      this.operationIds.set(name, (this.operationIds.get(name) ?? 0) + 1)
       const client = this.clients.get(name)
       if (client) {
-        void client.close().catch(() => {})
-        this.clients.delete(name)
+        await client.close().catch(() => {})
+        if (this.clients.get(name) === client) this.clients.delete(name)
       }
+      if (this.servers.get(name) !== server) return false
       server.status = 'disabled'
+      server.error = undefined
       server.tools = []
       server.resources = []
       return true
     }
-    return false
   }
 
   async reconnectServer(name: string): Promise<boolean> {
@@ -192,7 +198,7 @@ export class McpClientManager {
     }
 
     // Reconnect
-    await this.connectServer(name, server.config)
+    await this.connectServer(name, server.config, { force: true })
     return server.status === 'connected'
   }
 

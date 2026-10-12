@@ -1,24 +1,18 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core'
-import { createMicrocodeAgentRuntime } from './agent/index.ts'
+import { SessionManager } from './session/SessionManager.ts'
 import { getAllModels, getCustomModelDefs, getModels } from './models/index.ts'
 import { App } from './tui/app.ts'
-import { McpClientManager } from './mcp/client.ts'
-import { getProjectConfigPath, getUserConfigPath, isMcpConfigEmpty } from './mcp/config.ts'
+import { getProjectConfigPath, getUserConfigPath } from './mcp/config.ts'
 import { discoverMcpCapabilities, safeMcpConfigSummary } from './mcp/capabilities.ts'
 import type { ConfigScope } from './mcp/configWrite.ts'
-import { SessionManager } from './session/SessionManager.ts'
-import { createGitWorkTreeTool } from './tools/index.ts'
 import { type PermissionMode, PERMISSION_MODES } from './permissions/index.ts'
-import { cleanupImageCache } from './utils/imageUtils.ts'
-import { GitWorkTreeSystem } from './git/index.ts'
-import { loadProjectInstructions } from './instructions/projectInstructions.ts'
-import { PluginManager } from './plugins/PluginManager.ts'
 import { GatewayClient } from './daemon/client.ts'
 import { ensureGatewayDaemon, getGatewayStatus, rotateGatewayToken, showGatewayToken, stopGatewayDaemon } from './daemon/lifecycle.ts'
 import { runGatewayDaemon } from './daemon/run.ts'
 import { initializeTuiModelTransport } from './daemon/startup.ts'
 import { GATEWAY_PROTOCOL_VERSION } from './daemon/server.ts'
 import { configuredGatewayHost, setConfiguredGatewayHost } from './daemon/config.ts'
+import { RuntimeFactory } from './runtime/RuntimeFactory.ts'
+import { TuiAdapter } from './runtime/TuiAdapter.ts'
 
 declare const MACRO: {
   VERSION: string
@@ -36,6 +30,7 @@ USAGE
 
 COMMANDS
   gateway [COMMAND]       Manage the Model Gateway daemon
+  acp [OPTIONS]           Run Microcode as an ACP v1 Agent over stdio
   mcp list                List configured Model Context Protocol servers
   model list              List models available to Microcode
 
@@ -81,6 +76,23 @@ EXAMPLES
   microcode gateway status
 
 Use 'microcode <COMMAND> --help' for command-specific help.`
+
+const ACP_HELP = `Microcode ACP Agent
+Run Microcode as an Agent Client Protocol v1 Agent over stdio.
+
+USAGE
+  microcode acp [OPTIONS]
+
+OPTIONS
+  --model <PROVIDER/ID>   Select the initial model
+  --thinking <LEVEL>      Set reasoning depth: off, minimal, low, medium, high, xhigh
+  --permission <MODE>     Set approvals: interactive, auto-approve, or plan
+  --no-daemon             Use the in-process model runtime
+  --gateway-port <PORT>   Override the Model Gateway port
+  --gateway-host <HOST>   Override the Model Gateway bind address
+
+The ACP host is the protocol Client. Microcode runs as its ACP Agent and uses
+stdin/stdout for JSON-RPC; diagnostics are written to stderr.`
 
 const GATEWAY_HELP = `Microcode Model Gateway
 Local model inference service for Microcode and compatible API clients.
@@ -375,6 +387,16 @@ export async function main(): Promise<void> {
     return
   }
 
+  if (args[0] === 'acp') {
+    if (args.slice(1).some((arg) => arg === '--help' || arg === '-h')) {
+      console.log(ACP_HELP)
+      return
+    }
+    const { runAcpAgent } = await import('./acp/run.ts')
+    await runAcpAgent(args.slice(1))
+    return
+  }
+
   if (args[0] === 'gateway') {
     await handleGatewayCommand(args, gatewayPortOverride, gatewayHostOverride)
     return
@@ -427,9 +449,6 @@ export async function main(): Promise<void> {
   }
 
   const cwd = process.cwd()
-  const pluginManager = await PluginManager.create(cwd, MACRO.VERSION)
-  const pluginSnapshot = pluginManager.getSnapshot()
-  const projectInstructions = await loadProjectInstructions(cwd)
   const resumeFlagIdx = args.indexOf('--resume')
   const resumeFlag = resumeFlagIdx !== -1
   // Session ID is the arg after --resume, if it exists and isn't another flag
@@ -483,73 +502,62 @@ export async function main(): Promise<void> {
     }
   }
 
-  // Create session manager
   const sessionManager = new SessionManager()
-
-  // Resume or create session
-  let restoredMessages: AgentMessage[] | null = null
+  let resumeSession: Awaited<ReturnType<SessionManager['getLatestSession']>> = null
   if (resumeFlag) {
-    let targetSession = null
-
     if (resumeSessionId) {
-      // Resume specific session by ID
       const sessions = await sessionManager.list()
-      targetSession = sessions.find((s) => s.id.startsWith(resumeSessionId)) ?? null
-      if (!targetSession) {
+      resumeSession = sessions.find((session) => session.id.startsWith(resumeSessionId)) ?? null
+      if (!resumeSession) {
         console.error(`Session not found: ${resumeSessionId}`)
         process.exit(1)
       }
     } else {
-      // Resume latest session for this directory
-      targetSession = await sessionManager.getLatestSession(cwd)
+      resumeSession = await sessionManager.getLatestSession(cwd)
     }
+  }
 
-    if (targetSession) {
-      try {
-        restoredMessages = await sessionManager.open(targetSession)
-        console.log(`Resumed session: ${targetSession.id.slice(0, 8)}`)
-      } catch (error) {
-        console.error(`Failed to resume session: ${error instanceof Error ? error.message : String(error)}`)
-        sessionManager.beginDraft(cwd)
+  const projectCwd = resumeSession?.cwd ?? cwd
+  const factory = await RuntimeFactory.create({
+    cwd: projectCwd,
+    microcodeVersion: MACRO.VERSION,
+    sessions: sessionManager,
+    agent: {
+      modelId,
+      thinkingLevel,
+      permission: { mode: permissionMode },
+      identity: {
+        id: `assistant-${resumeSession?.id ?? 'session'}`,
+        name: 'Microcode',
+        role: 'assistant',
+      },
+      ...(gatewayClient ? {
+        initialModelConfig: gatewayClient.getProjectDefaultModelConfig(modelId),
+        resolveModelConfig: (id, api, provider) => gatewayClient!.resolveProjectModel(id, api, provider),
+        resolveModelApiKey: () => undefined,
+        streamFn: gatewayClient.streamSimple,
+        models: gatewayClient.asModelsProxy(),
+      } : {}),
+    },
+  })
+  const runtime = factory.runtime
+  if (resumeFlag) {
+    if (resumeSession) {
+      const result = await runtime.dispatch({
+        commandId: 'startup-resume',
+        command: { type: 'session.resume', sessionId: resumeSession.id, cwd: projectCwd },
+      })
+      if (result.ok && result.result) {
+        console.log(`Resumed session: ${resumeSession.id.slice(0, 8)}`)
+      } else {
+        const error = result.ok ? 'Session was not available.' : result.error.message
+        console.error(`Failed to resume session: ${error}`)
+        await runtime.dispatch({ commandId: 'startup-draft-after-resume', command: { type: 'session.begin_draft', cwd: projectCwd } })
       }
     } else {
       console.log('No previous session found. Starting new session.')
-      sessionManager.beginDraft(cwd)
     }
-  } else {
-    sessionManager.beginDraft(cwd)
   }
-
-  // Create MCP client and agent without waiting for MCP servers
-  const mcpClient = new McpClientManager()
-  const agent = createMicrocodeAgentRuntime({
-    cwd,
-    projectInstructions,
-    modelId,
-    thinkingLevel,
-    permission: { mode: permissionMode },
-    pluginSkills: [...pluginSnapshot.skills],
-    pluginDiagnostics: [...pluginSnapshot.diagnostics, ...pluginSnapshot.plugins.flatMap((plugin) => plugin.diagnostics.map((diagnostic) => `${plugin.name}: ${diagnostic}`))],
-    persistence: sessionManager,
-    identity: {
-      id: `assistant-${sessionManager.getSessionId() ?? 'session'}`,
-      name: 'Microcode',
-      role: 'assistant',
-    },
-    ...(gatewayClient ? {
-      initialModelConfig: gatewayClient.getProjectDefaultModelConfig(modelId),
-      resolveModelConfig: (id, api, provider) => gatewayClient!.resolveProjectModel(id, api, provider),
-      resolveModelApiKey: () => undefined,
-      streamFn: gatewayClient.streamSimple,
-      models: gatewayClient.asModelsProxy(),
-    } : {}),
-  })
-  // Restore messages if resuming
-  if (restoredMessages && restoredMessages.length > 0) {
-    agent.replaceMessages(restoredMessages, 'rebuild')
-  }
-
-  agent.addTools([createGitWorkTreeTool(() => GitWorkTreeSystem.open(cwd))])
 
   // Create TUI app (REPL starts immediately)
   let activeGatewayHost = gatewayClient?.bindHost
@@ -580,130 +588,46 @@ export async function main(): Promise<void> {
       }
     },
   } : undefined
-  const app = new App(agent, mcpClient, sessionManager, gatewayClient
+  const tuiAdapter = new TuiAdapter(runtime)
+  const app = new App(tuiAdapter.agent, tuiAdapter.mcp, tuiAdapter.sessions, gatewayClient
     ? (model, context, options) => gatewayClient!.completeSimple(model, context, options)
     : undefined, gatewayClient, gatewayClient, gatewayBindControl)
   if (gatewayStartupMessage) app.addStartupMessage(gatewayStartupMessage.message, gatewayStartupMessage.kind)
-  const activeMcpServerNames = new Set<string>()
-  app.setPluginManager(pluginManager, async (updatedSnapshot) => {
-    const snapshot = updatedSnapshot ?? await pluginManager.refresh(MACRO.VERSION)
-    const standaloneRegistry = await discoverMcpCapabilities(cwd)
-    const standalone = standaloneRegistry.configs
-    const desired = { ...standalone }
-    const collisions: string[] = []
-    for (const [name, config] of Object.entries(snapshot.mcpServers)) {
-      if (Object.hasOwn(desired, name)) {
-        collisions.push(`Plugin MCP server "${name}" conflicts with a configured MCP server; plugin server skipped.`)
-        continue
-      }
-      desired[name] = config
-    }
-    for (const name of activeMcpServerNames) {
-      if (!Object.hasOwn(desired, name)) {
-        await mcpClient.removeServer(name)
-        activeMcpServerNames.delete(name)
-      }
-    }
-    const configsToConnect: Array<[string, typeof desired[string]]> = []
-    for (const [name, config] of Object.entries(desired)) {
-      const current = mcpClient.getServer(name)
-      if (current && JSON.stringify(current.config) === JSON.stringify(config) && current.status !== 'disconnected' && current.status !== 'disabled') {
-        activeMcpServerNames.add(name)
-        continue
-      }
-      configsToConnect.push([name, config])
-    }
-    await Promise.allSettled(configsToConnect.map(async ([name, config]) => {
-      await mcpClient.connectServer(name, config)
-      activeMcpServerNames.add(name)
-    }))
-    agent.setPluginSkills([...snapshot.skills], [...snapshot.diagnostics, ...snapshot.plugins.flatMap((plugin) => plugin.diagnostics.map((diagnostic) => `${plugin.name}: ${diagnostic}`))])
-    app.updateMcpState(mcpClient)
-    for (const warning of collisions) app.addStartupWarning(warning)
-    for (const warning of standaloneRegistry.diagnostics) app.addStartupWarning(warning)
-  })
-  for (const warning of pluginSnapshot.diagnostics) app.addStartupWarning(`Plugin discovery: ${warning}`)
-  for (const plugin of pluginSnapshot.plugins) {
-    if (plugin.health === 'invalid' || plugin.health === 'incompatible') {
-      app.addStartupWarning(`Plugin '${plugin.name}' is ${plugin.health}; inspect it with /plugins.`)
-    }
-  }
-
-  // Wire permission prompt to TUI (own tool calls)
-  agent.setPermissionRequestHandler(
+  if (tuiAdapter.plugins) app.setPluginManager(tuiAdapter.plugins)
+  for (const warning of factory.startupWarnings) app.addStartupWarning(warning)
+  tuiAdapter.bindPermissionHandlers(
     (toolName, input, description) => app.promptPermission(toolName, input, description),
-  )
-  // Wire ask_user_question interactive handler to TUI
-  agent.setAskUserQuestionHandler(
     (toolName, input) => app.promptAskUserQuestion(toolName, input),
   )
 
-  // Handle exit from TUI (Ctrl+C, Ctrl+D, Escape)
-  app.onExit = async () => {
-    try {
-      await agent.persistMessages()
-    } catch {
-      // Ignore save errors on shutdown
-    }
-    await sessionManager.close()
-    await mcpClient.disconnectAll()
-    const sessionId = sessionManager.getSessionId()
+  const finishRuntime = async (stopUi: boolean) => {
+    const sessionId = runtime.getSnapshot().session.id
+    if (stopUi) app.stop()
+    try { await runtime.close() } catch { /* Resources were released; preserve the existing quiet shutdown behavior. */ }
+    tuiAdapter.dispose()
     if (sessionId) {
       console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
     }
-    cleanupImageCache(sessionId ?? '')
     process.exit(0)
   }
-
-  // Connect MCP servers in background — non-blocking
-  const standaloneRegistry = await discoverMcpCapabilities(cwd)
-  for (const warning of standaloneRegistry.diagnostics) app.addStartupWarning(warning)
-  const combinedMcpConfigs = { ...standaloneRegistry.configs }
-  for (const [name, config] of Object.entries(pluginSnapshot.mcpServers)) {
-    if (Object.hasOwn(combinedMcpConfigs, name)) {
-      app.addStartupWarning(`Plugin MCP server "${name}" conflicts with a configured MCP server; plugin server skipped.`)
-      continue
-    }
-    combinedMcpConfigs[name] = config
+  let shuttingDown = false
+  const shutdown = async (stopUi = false) => {
+    if (shuttingDown) return
+    shuttingDown = true
+    await finishRuntime(stopUi)
   }
-  for (const name of Object.keys(combinedMcpConfigs)) activeMcpServerNames.add(name)
-  if (!isMcpConfigEmpty(combinedMcpConfigs)) {
-    void mcpClient.connectAll(combinedMcpConfigs).then(() => {
-      // Rebuild system prompt with MCP info and deferred tool names
-      app.updateMcpState(mcpClient)
+  app.onExit = () => shutdown()
 
-      // Notify user in chat
-      app.showMcpReady(mcpClient.getServerStates())
-    })
-  } else {
-    app.updateMcpState(mcpClient)
-  }
-
-  // Handle graceful shutdown
-  const shutdown = async () => {
-    // Save session before exit
-    try {
-      await agent.persistMessages()
-    } catch {
-      // Ignore save errors on shutdown
-    }
-    await sessionManager.close()
-    await mcpClient.disconnectAll()
-    app.stop()
-    // Print resume command
-    const sessionId = sessionManager.getSessionId()
-    if (sessionId) {
-      console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
-    }
-    cleanupImageCache(sessionId ?? '')
-    process.exit(0)
-  }
+  void factory.mcpReady.then(() => {
+    const states = tuiAdapter.mcp.getServerStates()
+    if (states.length > 0) app.showMcpReady(states)
+  }).catch(() => undefined)
 
   process.on('SIGINT', () => {
-    void shutdown()
+    void shutdown(true)
   })
   process.on('SIGTERM', () => {
-    void shutdown()
+    void shutdown(true)
   })
 
   // If there's an initial prompt argument, send it after app starts

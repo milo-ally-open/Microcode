@@ -8,6 +8,7 @@ export type PermissionRuleSource =
   | 'globalSettings'
   | 'projectSettings'
   | 'cliArg'
+  | 'inherited'
   | 'session'
 
 export interface PermissionRule {

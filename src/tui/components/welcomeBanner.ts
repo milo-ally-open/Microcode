@@ -4,6 +4,8 @@ import { theme } from '../theme.ts'
 
 /** A bordered startup panel with a responsive pixel wordmark and concise hints. */
 export class WelcomeBanner implements Component {
+  invalidate(): void {}
+
   render(width: number): string[] {
     const terminalWidth = Math.max(20, Math.floor(width))
     const contentWidth = terminalWidth - 4

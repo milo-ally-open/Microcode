@@ -149,6 +149,20 @@ export class AppLayout implements Component {
     this.scrollTop = undefined
   }
 
+  invalidate(): void {
+    this.lastViewportHeight = 1
+    this.lastMaxTop = 0
+    this.scrollbarTrackTop = 0
+    this.scrollbarTrackLength = 0
+    this.scrollbarThumbStart = 0
+    this.scrollbarThumbLength = 0
+    this.scrollbarColumn = 0
+    this.returnButtonRow = 0
+    this.returnButtonStartColumn = 0
+    this.returnButtonEndColumn = 0
+    this.toolToggleButtons = []
+  }
+
   render(width: number): string[] {
     const headerLines = this.header.render(width)
     const chatWidth = Math.max(1, width - 1)

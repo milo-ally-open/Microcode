@@ -57,3 +57,14 @@ Creates:
 
 The CLI package contains a standalone `bin/microcode` binary and `install.sh`.
 On Windows it also includes `install.cmd`.
+
+## Windows Desktop Package
+
+Build the current-user Windows x64 desktop candidate with:
+
+```powershell
+bun install --frozen-lockfile
+bun run desktop:release:windows
+```
+
+This command requires Bun 1.3.14 and runs the typecheck, test suite, production builds, packaged backend/workspace/review/terminal smoke, isolated install/upgrade/uninstall smoke, and archive integrity checks before writing a ZIP and SHA-256 sidecar to `dist/releases/`. The application installer and manual Windows UI acceptance steps are documented in [`desktop/README.md`](desktop/README.md).

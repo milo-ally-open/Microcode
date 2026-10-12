@@ -7,6 +7,7 @@ const MAX_BUFFER = 10 * 1024 * 1024
 
 export interface GitFileChange {
   path: string
+  previousPath?: string
   indexStatus: string
   worktreeStatus: string
   staged: boolean
@@ -207,15 +208,17 @@ export class GitRepository {
       const worktreeStatus = record[1] ?? ' '
       const path = record.slice(3)
       if (!path) continue
+      const renamed = indexStatus === 'R' || indexStatus === 'C' || worktreeStatus === 'R' || worktreeStatus === 'C'
       changes.push({
         path,
+        ...(renamed && records[i + 1] ? { previousPath: records[i + 1] } : {}),
         indexStatus,
         worktreeStatus,
         staged: indexStatus !== ' ' && indexStatus !== '?',
         unstaged: worktreeStatus !== ' ' && indexStatus !== '?',
         untracked: indexStatus === '?' && worktreeStatus === '?',
       })
-      if (indexStatus === 'R' || indexStatus === 'C' || worktreeStatus === 'R' || worktreeStatus === 'C') {
+      if (renamed) {
         i++ // NUL-delimited porcelain emits the source path as an extra record.
       }
     }

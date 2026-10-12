@@ -82,4 +82,22 @@ describe('permissions modules', () => {
       args: { file_path: 'a' },
     } as any))?.reason).toContain('denied by user')
   })
+
+  test('permission manager inherits a snapshot and appends stricter local denies', () => {
+    const parent = new PermissionManager({ mode: 'auto-approve', allowedTools: ['write(src/*)'] })
+    const child = new PermissionManager({ mode: 'plan', allowedTools: ['bash'] })
+
+    child.inheritFrom(parent.getSnapshot(), [{ toolName: 'bash', ruleContent: 'rm*' }])
+
+    expect(child.getMode()).toBe('auto-approve')
+    expect(child.checkPermission('write', { path: 'src/file.ts' }).allowed).toBe(true)
+    expect(child.checkPermission('bash', { command: 'rm -rf /tmp' })).toEqual({
+      allowed: false,
+      reason: 'Tool "bash" denied by rule: bash(rm*)',
+    })
+
+    child.setMode('plan')
+    child.inheritFrom(parent.getSnapshot(), [], false)
+    expect(child.getMode()).toBe('plan')
+  })
 })
