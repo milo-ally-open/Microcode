@@ -49,6 +49,8 @@ export interface DesktopReleaseManifest {
       readonly conversationSession?: 'passed'
       readonly reviewDiff?: 'passed'
       readonly gitBashTerminal?: 'passed'
+      readonly gitBashTerminalColors?: 'passed'
+      readonly openAiCodexOAuth?: 'authorization-url-opened-and-cancelled'
       readonly secretScan?: 'passed'
       readonly orphanProcessScan?: 'passed'
     }

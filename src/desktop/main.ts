@@ -9,6 +9,8 @@ import type { DesktopBackendSnapshot, DesktopImageAttachment, DesktopProjectRef 
 import { DesktopRequestError, redactDisplayText, validateRendererIpc } from './security.ts'
 import { DESKTOP_APP_VERSION } from './buildInfo.ts'
 
+if (process.argv.includes('--microcode-smoke-test')) process.env.MICROCODE_DESKTOP_SMOKE_TEST = '1'
+
 const mainDirectory = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(mainDirectory, '../..')
 const rendererEntry = join(mainDirectory, 'index.html')
@@ -313,9 +315,22 @@ app.whenReady().then(async () => {
           if (terminalOutput.includes(terminalMarker)) resolveTerminalOutput()
         })
         let terminalId: string | undefined
+        let promptColorVerified = false
         try {
           terminalId = await backend.request<string>('terminal.create', { cols: 80, rows: 24 })
-          await backend.request('terminal.write', { terminalId, data: `printf '${terminalMarker}\\n'\r` })
+          const promptDeadline = Date.now() + 5_000
+          while (Date.now() < promptDeadline) {
+            if (terminalOutput.includes('\u001b[32m') && /\r?\n\$ /.test(terminalOutput)) {
+              promptColorVerified = true
+              break
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20))
+          }
+          if (!promptColorVerified) throw new Error('The packaged Git Bash prompt did not emit its ANSI color sequence.')
+          const markerSplit = Math.floor(terminalMarker.length / 2)
+          const markerPrefix = terminalMarker.slice(0, markerSplit)
+          const markerSuffix = terminalMarker.slice(markerSplit)
+          await backend.request('terminal.write', { terminalId, data: `printf '\\033[32m%s%s\\033[0m\\n' '${markerPrefix}' '${markerSuffix}'\r` })
           await terminalOutputReady
         } finally {
           clearTimeout(terminalTimeout)
@@ -326,6 +341,7 @@ app.whenReady().then(async () => {
         report.conversationSession = 'passed'
         report.reviewDiff = 'passed'
         report.gitBashTerminal = 'passed'
+        report.gitBashTerminalColors = 'passed'
 
         const models = await backend.request<readonly { readonly id: string; readonly provider: string; readonly api: string; readonly authentication: string }[]>('models.list')
         const unconfiguredModel = models.find((model) => model.authentication === 'missing')
@@ -340,6 +356,17 @@ app.whenReady().then(async () => {
         } else {
           report.providerWithoutCredentials = 'not-tested-no-unconfigured-model'
         }
+
+        const oauthLogin = backend.request<{ readonly status: string }>('auth.login', { providerId: 'openai-codex', authType: 'oauth' })
+        const oauthStartup = await Promise.race([
+          oauthLogin.then(() => 'completed' as const),
+          new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 500)),
+        ])
+        if (oauthStartup !== 'pending') throw new Error('OpenAI Codex OAuth ended before exposing its browser authorization URL.')
+        await backend.request('auth.cancel_login')
+        const oauthResult = await oauthLogin
+        if (oauthResult.status !== 'cancelled') throw new Error('OpenAI Codex OAuth smoke login did not cancel cleanly.')
+        report.openAiCodexOAuth = 'authorization-url-opened-and-cancelled'
       }
 
       console.log(`MICROCODE_DESKTOP_SMOKE_OK ${JSON.stringify(report)}`)

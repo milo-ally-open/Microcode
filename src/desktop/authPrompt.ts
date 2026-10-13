@@ -196,11 +196,24 @@ export async function openProviderAuthUrl(value: string): Promise<void> {
   const command = process.platform === 'win32'
     ? ['rundll32.exe', 'url.dll,FileProtocolHandler', url.toString()]
     : process.platform === 'darwin' ? ['open', url.toString()] : ['xdg-open', url.toString()]
-  try {
-    const child = spawn(command[0]!, command.slice(1), { stdio: 'ignore', windowsHide: true, detached: true })
-    child.on('error', () => undefined)
-    child.unref()
-  } catch {
-    throw new Error('Could not open the system browser for provider sign-in.')
-  }
+  await new Promise<void>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(command[0]!, command.slice(1), { stdio: 'ignore', windowsHide: true, detached: true })
+    } catch {
+      reject(new Error('Could not open the system browser for provider sign-in.'))
+      return
+    }
+    const onError = () => {
+      child.removeListener('spawn', onSpawn)
+      reject(new Error('Could not open the system browser for provider sign-in.'))
+    }
+    const onSpawn = () => {
+      child.removeListener('error', onError)
+      child.unref()
+      resolve()
+    }
+    child.once('error', onError)
+    child.once('spawn', onSpawn)
+  })
 }

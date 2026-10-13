@@ -108,7 +108,9 @@ if ($actualPaths.Count -ne $expectedPaths.Count) { throw 'The release package co
 foreach ($relative in $actualPaths) { if (-not $expectedPaths.Contains($relative)) { throw "The release package contains an unlisted file: $relative" } }
 
 $parent = Split-Path -Parent $installPath
-New-Item -ItemType Directory -Path $parent -Force | Out-Null
+if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+  New-Item -ItemType Directory -Path $parent -Force | Out-Null
+}
 $stage = "$installPath.new-$PID"
 $backup = "$installPath.previous-$PID"
 if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $backup)) { throw 'A previous installation staging directory needs inspection before retrying.' }

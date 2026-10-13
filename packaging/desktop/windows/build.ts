@@ -360,6 +360,8 @@ manifest = {
       conversationSession: 'passed',
       reviewDiff: 'passed',
       gitBashTerminal: 'passed',
+      gitBashTerminalColors: 'passed',
+      openAiCodexOAuth: 'authorization-url-opened-and-cancelled',
       secretScan: 'passed',
       orphanProcessScan: 'passed',
     },
@@ -386,7 +388,7 @@ await runPowerShell(join(import.meta.dir, 'Compile-WindowsSetup.ps1'), {
   ProductVersion: packageVersion,
   BuildMode: 'smoke',
   SmokeId: smokeId,
-  SmokeDefaultInstallDirectory: smokeInstallDirectory,
+  SmokeDefaultInstallDirectory: join(smokeRoot, 'NSIS default install location'),
   SmokeStartMenuPath: smokeStartMenuPath,
   SmokeDesktopPath: smokeDesktopPath,
 })
@@ -397,6 +399,7 @@ const installSmoke = await runPowerShell(join(projectRoot, 'tests', 'packaging',
   SmokeStartMenuPath: smokeStartMenuPath,
   SmokeDesktopPath: smokeDesktopPath,
   InstallDirectory: smokeInstallDirectory,
+  PackageDirectory: packageRoot,
   ProductVersion: packageVersion,
 })
 console.log(installSmoke)

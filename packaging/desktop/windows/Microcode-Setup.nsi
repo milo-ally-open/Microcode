@@ -41,7 +41,11 @@ Name "Microcode ${PROJECT_VERSION}"
 Caption "Microcode Setup"
 BrandingText "Microcode"
 OutFile "${OUTPUT_FILE}"
-InstallDir "$LOCALAPPDATA\Programs\Microcode"
+!ifdef SMOKE_TEST
+  InstallDir "${SMOKE_DEFAULT_INSTALL_DIR}"
+!else
+  InstallDir "$LOCALAPPDATA\Programs\Microcode"
+!endif
 InstallDirRegKey HKCU "${SETTINGS_KEY}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -92,7 +96,6 @@ Function .onInit
   SetShellVarContext current
   !insertmacro MUI_LANGDLL_DISPLAY
 !ifdef SMOKE_TEST
-  StrCpy $INSTDIR "${SMOKE_DEFAULT_INSTALL_DIR}"
   ReadRegStr $R1 HKCU "${UNINSTALL_KEY}" "InstallLocation"
 !else
   ReadRegStr $R1 HKCU "${UNINSTALL_KEY}" "InstallLocation"

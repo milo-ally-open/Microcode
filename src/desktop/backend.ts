@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline'
 import { stdin, stdout } from 'node:process'
 import { DesktopBackend } from './DesktopBackend.ts'
+import type { ProviderAuthPrompt } from './authPrompt.ts'
 import { DESKTOP_TRANSPORT_PROTOCOL_VERSION } from './protocol.ts'
 import { DesktopRequestError, redactDisplayText } from './security.ts'
 import { DESKTOP_APP_VERSION } from './buildInfo.ts'
@@ -8,7 +9,34 @@ import { RUNTIME_PROTOCOL_VERSION } from '../runtime/protocol.ts'
 
 const FRAME_PREFIX = '@@MICROCODE_DESKTOP@@'
 const MAX_REQUEST_BYTES = 24 * 1024 * 1024
-const backend = new DesktopBackend()
+const smokeTest = process.env.MICROCODE_DESKTOP_SMOKE_TEST === '1'
+const smokeAuthPrompt: ProviderAuthPrompt = async (prompt, signal) => {
+  if (prompt.type === 'select') {
+    const browser = prompt.options.find((option) => option.id === 'browser')
+    if (!browser) throw new Error('OpenAI Codex did not offer browser sign-in.')
+    return browser.id
+  }
+  if (prompt.type === 'manual_code') {
+    return new Promise<string>((_resolve, reject) => {
+      const cancel = () => {
+        signal.removeEventListener('abort', cancel)
+        reject(new Error('Authentication cancelled.'))
+      }
+      if (signal.aborted) cancel()
+      else signal.addEventListener('abort', cancel, { once: true })
+    })
+  }
+  throw new Error('Unexpected credential prompt in the OAuth startup smoke test.')
+}
+const smokeOpenAuthUrl = async (value: string): Promise<void> => {
+  const url = new URL(value)
+  if (url.origin !== 'https://auth.openai.com' || url.pathname !== '/oauth/authorize') {
+    throw new Error('OpenAI Codex returned an unexpected authorization URL.')
+  }
+}
+const backend = smokeTest
+  ? new DesktopBackend(undefined, undefined, undefined, smokeAuthPrompt, smokeOpenAuthUrl)
+  : new DesktopBackend()
 const activeRequests = new Set<string>()
 
 function writeFrame(value: unknown): void {

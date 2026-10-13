@@ -12,9 +12,11 @@ describe('desktop renderer boundary', () => {
     expect(() => validateRendererIpc('readDiff', { path: '../outside.txt' })).not.toThrow()
     expect(() => validateRendererIpc('respondToPermission', { requestId: 'x', decision: 'run', command: 'whoami' })).toThrow()
     expect(() => validateRendererIpc('createTerminal', { cols: 120, rows: 32 })).not.toThrow()
+    expect(() => validateRendererIpc('createTerminal', { cols: 1, rows: 1 })).not.toThrow()
     expect(() => validateRendererIpc('writeTerminal', { terminalId: 'pty-1', data: 'pwd\r' })).not.toThrow()
     expect(() => validateRendererIpc('writeTerminal', { terminalId: 'pty-1', data: 'pwd\r', cwd: 'C:\\' })).toThrow()
     expect(() => validateRendererIpc('resizeTerminal', { terminalId: 'pty-1', cols: 10000, rows: 32 })).toThrow()
+    expect(() => validateRendererIpc('resizeTerminal', { terminalId: 'pty-1', cols: 1, rows: 1 })).not.toThrow()
     expect(() => validateRendererIpc('bootstrap' as never, { arbitrary: true })).toThrow()
   })
 

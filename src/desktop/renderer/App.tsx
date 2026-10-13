@@ -17,6 +17,8 @@ import { applyRuntimeEvent, messageText } from './state.ts'
 import { buildProjectTree, labelProjectSessions, sessionsWithActiveDraft } from './project-tree.ts'
 import { buildReviewChangeTree, filterReviewChangeTree, type ReviewTreeNode } from './change-tree.ts'
 import { DESKTOP_TERMINAL_THEME } from './terminal-theme.ts'
+import { normalizeTerminalDimensions } from './terminal-dimensions.ts'
+import { encodePastedImage, getPastedImageFiles, MAX_DESKTOP_IMAGE_ATTACHMENTS } from './image-attachments.ts'
 import { redactDisplayText, redactDisplayValue } from '../security.ts'
 import { SettingsPanel } from './SettingsPanel.tsx'
 
@@ -303,6 +305,7 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const terminalIdRef = useRef('')
+  const lastResizeRef = useRef<{ readonly terminalId: string; readonly cols: number; readonly rows: number } | null>(null)
   const startingRef = useRef(false)
   const activeRef = useRef(active)
   const pendingEventsRef = useRef<DesktopEvent[]>([])
@@ -325,6 +328,7 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
       return
     }
     terminalIdRef.current = ''
+    lastResizeRef.current = null
     setTerminalStatus(`Bash exited (${event.signal || event.exitCode}).`)
     terminal.writeln(`\r\n[Process exited: ${event.signal || `code ${event.exitCode}`}]`)
   }
@@ -337,8 +341,17 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
     if (!activeRef.current || !host || host.clientWidth === 0 || host.clientHeight === 0 || !terminal || !fit) return
     try {
       fit.fit()
+      const dimensions = normalizeTerminalDimensions(terminal.cols, terminal.rows)
+      if (terminal.cols !== dimensions.cols || terminal.rows !== dimensions.rows) terminal.resize(dimensions.cols, dimensions.rows)
       const terminalId = terminalIdRef.current
-      if (terminalId) void bridge.resizeTerminal(terminalId, terminal.cols, terminal.rows).catch((error) => onError(String(error)))
+      const previous = lastResizeRef.current
+      if (terminalId && (previous?.terminalId !== terminalId || previous.cols !== dimensions.cols || previous.rows !== dimensions.rows)) {
+        lastResizeRef.current = { terminalId, ...dimensions }
+        void bridge.resizeTerminal(terminalId, dimensions.cols, dimensions.rows).catch((error) => {
+          lastResizeRef.current = null
+          onError(String(error))
+        })
+      }
     } catch { /* The panel can briefly have no measurable size while its container is changing. */ }
   }
 
@@ -353,13 +366,16 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
     unsubscribeRef.current = bridge.onEvent((event) => handleEventRef.current(event))
     try {
       syncSizeRef.current()
-      const dimensions = fitRef.current?.proposeDimensions() ?? { cols: terminal.cols, rows: terminal.rows }
+      const proposed = fitRef.current?.proposeDimensions()
+      const dimensions = normalizeTerminalDimensions(proposed?.cols ?? terminal.cols, proposed?.rows ?? terminal.rows)
+      if (terminal.cols !== dimensions.cols || terminal.rows !== dimensions.rows) terminal.resize(dimensions.cols, dimensions.rows)
       const terminalId = await bridge.createTerminal(dimensions.cols, dimensions.rows)
       if (!hostRef.current) {
         await bridge.closeTerminal(terminalId)
         return
       }
       terminalIdRef.current = terminalId
+      lastResizeRef.current = { terminalId, ...dimensions }
       setTerminalStatus('Bash · interactive PTY')
       for (const event of pendingEventsRef.current.splice(0)) handleEventRef.current(event)
       syncSizeRef.current()
@@ -410,6 +426,7 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
       unsubscribeRef.current = null
       const terminalId = terminalIdRef.current
       terminalIdRef.current = ''
+      lastResizeRef.current = null
       if (terminalId) void bridge.closeTerminal(terminalId).catch(() => undefined)
       terminal.dispose()
       terminalRef.current = null
@@ -782,6 +799,19 @@ export function App() {
     } catch (error) { setErrorNotice(error instanceof Error ? error.message : String(error)) }
   }
 
+  const attachPastedImages = async (files: readonly File[]) => {
+    const available = Math.max(0, MAX_DESKTOP_IMAGE_ATTACHMENTS - attachments.length)
+    if (files.length > available) setErrorNotice('You can attach up to four images. Remove an image before pasting more.')
+    const selected = files.slice(0, available)
+    if (!selected.length) return
+    try {
+      const next = await Promise.all(selected.map((file, index) => encodePastedImage(file, index + 1)))
+      setAttachments((current) => [...current, ...next].slice(0, MAX_DESKTOP_IMAGE_ATTACHMENTS))
+    } catch (error) {
+      setErrorNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const changeModel = async (key: string) => {
     const selected = models.find((item) => modelKey(item) === key)
     if (!selected) return
@@ -910,10 +940,16 @@ export function App() {
                     {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment, index) => <div className="attachment-chip" key={`${attachment.name}-${index}`}><img src={`data:${attachment.image.mimeType};base64,${attachment.image.data}`} alt="" /><span>{attachment.name}</span><button aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} type="button">×</button></div>)}</div>}
                     <textarea
                       aria-label="Message Microcode"
-                      placeholder={snapshot.pendingPermissions.length ? 'Resolve the request above to continue…' : 'Ask Microcode anything about this project…'}
+                      placeholder={snapshot.pendingPermissions.length ? 'Resolve the request above to continue…' : 'Ask Microcode anything about this project, or paste an image…'}
                       value={draft}
                       maxLength={120_000}
                       onChange={(event) => setDraft(event.target.value)}
+                      onPaste={(event) => {
+                        const files = getPastedImageFiles(event.clipboardData)
+                        if (!files.length) return
+                        if (!event.clipboardData.getData('text/plain')) event.preventDefault()
+                        void attachPastedImages(files)
+                      }}
                       onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendPrompt() } }}
                       disabled={!runtime || snapshot.pendingPermissions.length > 0}
                     />
@@ -923,7 +959,7 @@ export function App() {
                         <label className="select-control model-select"><span className="control-dot">◉</span><select aria-label="Model" value={modelValue} disabled={modelsLoading || models.length === 0} onChange={(event) => void changeModel(event.target.value)}><option value="">{modelsLoading ? 'Loading models…' : runtime?.agent.model.name || 'Model'}</option>{models.map((model) => <option key={modelKey(model)} value={modelKey(model)}>{model.name} · {model.provider}{model.authentication === 'missing' ? ' · set up in Settings' : model.authentication === 'error' ? ' · auth check failed' : ''}</option>)}</select><span className="select-chevron">⌄</span></label>
                         <label className="select-control permission-select"><span className="mode-indicator">{currentMode === 'interactive' ? '◈' : currentMode === 'plan' ? '◇' : '✓'}</span><select aria-label="Permission mode" value={currentMode} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="interactive">Ask each time</option><option value="plan">Plan mode</option><option value="auto-approve">Auto approve</option></select><span className="select-chevron">⌄</span></label>
                       </div>
-                      <div className="composer-right-controls"><span className="composer-hint">Enter to send · Shift+Enter for newline</span>{running ? <button className="stop-button" disabled={canceling} onClick={() => void cancelPrompt()} type="button"><span>■</span>{canceling ? 'Stopping…' : 'Stop'}</button> : <button className="send-button" disabled={!draft.trim()} onClick={() => void sendPrompt()} type="button"><span>↑</span></button>}</div>
+                      <div className="composer-right-controls"><span className="composer-hint">Ctrl+V to paste images · Enter to send · Shift+Enter for newline</span>{running ? <button className="stop-button" disabled={canceling} onClick={() => void cancelPrompt()} type="button"><span>■</span>{canceling ? 'Stopping…' : 'Stop'}</button> : <button className="send-button" disabled={!draft.trim()} onClick={() => void sendPrompt()} type="button"><span>↑</span></button>}</div>
                     </div>
                   </div>
                   <p className="composer-disclaimer">Microcode can make mistakes. Review changes before applying them.</p>

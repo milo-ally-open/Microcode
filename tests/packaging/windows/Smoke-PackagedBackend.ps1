@@ -14,6 +14,7 @@ $workspace = Join-Path $root 'project with spaces'
 $stdoutPath = Join-Path $root 'packaged-smoke.stdout.log'
 $stderrPath = Join-Path $root 'packaged-smoke.stderr.log'
 $gitRoot = Join-Path (Split-Path -Parent $app) 'resources/git'
+$backendExecutable = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $app) 'resources/microcode-backend.exe'))
 $gitExecutable = Join-Path $gitRoot 'cmd/git.exe'
 if (-not (Test-Path -LiteralPath $gitExecutable -PathType Leaf)) { throw 'The release package is missing its portable Git runtime.' }
 New-Item -ItemType Directory -Path $userData,$workspace -Force | Out-Null
@@ -67,7 +68,8 @@ try {
   }
   $exitCode = $process.ExitCode
   if ($null -ne $exitCode -and $exitCode -ne 0) { throw "Packaged application backend/workflow smoke failed with exit code $exitCode. See isolated diagnostics under $root." }
-  if ($stderr -match '(?m)^MICROCODE_DESKTOP_SMOKE_FAILED(?:\s|$)') { throw "Packaged application reported a backend/workflow smoke failure. See isolated diagnostics under $root." }
+  $smokeFailureLine = $stderr -split '\r?\n' | Where-Object { $_ -match '^MICROCODE_DESKTOP_SMOKE_FAILED(?:\s|$)' } | Select-Object -First 1
+  if ($smokeFailureLine) { throw "Packaged application reported a backend/workflow smoke failure: $($smokeFailureLine.Trim())" }
 
   $handshakeLine = ($stdout -split '\r?\n' | Where-Object { $_ -match '^MICROCODE_DESKTOP_SMOKE_OK ' } | Select-Object -First 1)
   if (-not $handshakeLine) { throw 'Packaged application did not report a compatible backend and protocol handshake.' }
@@ -78,21 +80,32 @@ try {
   foreach ($workflow in @('workspace', 'conversationSession', 'reviewDiff', 'gitBashTerminal')) {
     if ($handshake.$workflow -ne 'passed') { throw "Packaged application did not pass its $workflow workflow smoke." }
   }
+  if ($handshake.gitBashTerminalColors -ne 'passed') { throw 'Packaged Git Bash did not pass its ANSI color smoke.' }
+  if ($handshake.openAiCodexOAuth -ne 'authorization-url-opened-and-cancelled') { throw 'Packaged OpenAI Codex OAuth did not open and cancel its browser authorization flow.' }
   if ($handshake.providerWithoutCredentials -notin @('clear-configuration-error', 'not-tested-no-unconfigured-model')) {
     throw 'Packaged application did not report a usable provider setup state.'
   }
 
   $deadline = [DateTime]::UtcNow.AddSeconds(8)
+  $orphanBackendProcesses = @()
+  $orphanTerminalProcesses = @()
   do {
-    $orphanProcesses = [System.Diagnostics.Process]::GetProcessesByName('microcode-backend')
-    $orphanCount = $orphanProcesses.Count
-    foreach ($orphan in $orphanProcesses) { $orphan.Dispose() }
-    if ($orphanCount -eq 0) { break }
+    $orphanBackendProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'microcode-backend.exe'" | Where-Object {
+      $_.ExecutablePath -and [string]::Equals([System.IO.Path]::GetFullPath($_.ExecutablePath), $backendExecutable, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    $orphanTerminalProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'bash.exe'" | Where-Object {
+      $_.CommandLine -and $_.CommandLine.IndexOf($gitRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    if ($orphanBackendProcesses.Count -eq 0 -and $orphanTerminalProcesses.Count -eq 0) { break }
     Start-Sleep -Milliseconds 250
   } while ([DateTime]::UtcNow -lt $deadline)
-  if ($orphanCount -gt 0) { throw 'The packaged backend remained running after the desktop application exited.' }
+  if ($orphanBackendProcesses.Count -gt 0) { throw 'The packaged backend remained running after the desktop application exited.' }
+  if ($orphanTerminalProcesses.Count -gt 0) {
+    foreach ($orphan in $orphanTerminalProcesses) { Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue }
+    throw 'The packaged Bash terminal remained running after the desktop application exited.'
+  }
   Write-Output ($handshakeLine.Trim())
-  Write-Output 'PACKAGED_BACKEND_SMOKE=passed; project_session=passed; git_review=passed; git_bash_terminal=passed; secret_scan=passed; orphan_process_scan=passed'
+  Write-Output 'PACKAGED_BACKEND_SMOKE=passed; project_session=passed; git_review=passed; git_bash_terminal=passed; terminal_colors=passed; openai_codex_oauth=passed; secret_scan=passed; orphan_process_scan=passed'
 } finally {
   if ($process -and -not $process.HasExited) {
     & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null

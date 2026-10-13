@@ -79,14 +79,14 @@ export function validateRendererIpc(method: RendererIpcMethod, payload?: unknown
       if (Object.keys(value).length !== 0) throw new DesktopRequestError('invalid_request', 'This operation does not accept a payload.')
       return
     case 'createTerminal':
-      if (!exactKeys(value, ['cols', 'rows']) || !boundedInteger(value.cols, 20, 300) || !boundedInteger(value.rows, 5, 100)) break
+      if (!exactKeys(value, ['cols', 'rows']) || !boundedInteger(value.cols, 1, 300) || !boundedInteger(value.rows, 1, 100)) break
       return
     case 'writeTerminal':
       if (!exactKeys(value, ['terminalId', 'data']) || !boundedString(value.terminalId, 128) || !boundedString(value.data, 64 * 1024, false)) break
       return
     case 'resizeTerminal':
       if (!exactKeys(value, ['terminalId', 'cols', 'rows']) || !boundedString(value.terminalId, 128)
-        || !boundedInteger(value.cols, 20, 300) || !boundedInteger(value.rows, 5, 100)) break
+        || !boundedInteger(value.cols, 1, 300) || !boundedInteger(value.rows, 1, 100)) break
       return
     case 'closeTerminal':
       if (!exactKeys(value, ['terminalId']) || !boundedString(value.terminalId, 128)) break

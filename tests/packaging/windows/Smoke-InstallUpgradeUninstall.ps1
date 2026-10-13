@@ -6,13 +6,16 @@ param(
   [Parameter(Mandatory = $true)][string]$SmokeStartMenuPath,
   [Parameter(Mandatory = $true)][string]$SmokeDesktopPath,
   [Parameter(Mandatory = $true)][string]$InstallDirectory,
+  [Parameter(Mandatory = $true)][string]$PackageDirectory,
   [Parameter(Mandatory = $true)][string]$ProductVersion
 )
 
 $ErrorActionPreference = 'Stop'
 if ($SmokeId -notmatch '^[0-9a-f]{12}$') { throw 'The smoke-test installation ID is invalid.' }
 $root = [System.IO.Path]::GetFullPath($SmokeRoot).TrimEnd('\') + '\'
+$rootInstallPath = Join-Path ([System.IO.Path]::GetPathRoot($root)) "Microcode Setup Smoke $SmokeId"
 $installPath = [System.IO.Path]::GetFullPath($InstallDirectory)
+$driveRootParentSmoke = 'skipped_unwritable'
 $startMenuPath = [System.IO.Path]::GetFullPath($SmokeStartMenuPath)
 $desktopPath = [System.IO.Path]::GetFullPath($SmokeDesktopPath)
 if (-not $installPath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -or -not $startMenuPath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -or -not $desktopPath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -42,7 +45,7 @@ try {
   $env:MICROCODE_SETUP_NO_LAUNCH = '1'
 
   $setupLog = Join-Path $env:TEMP "Microcode-Setup-$ProductVersion.log"
-  $arguments = '/S /D="' + $installPath + '"'
+  $arguments = '/S /D=' + $installPath
   $setup = Start-Process -FilePath $SetupExecutable -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $SetupExecutable) -WindowStyle Hidden -PassThru -Wait
   if ($setup.ExitCode -ne 0) {
     $diagnostic = if (Test-Path -LiteralPath $setupLog) { (Get-Content -LiteralPath $setupLog -Tail 80) -join "`n" } else { '' }
@@ -85,7 +88,32 @@ try {
   if (Test-Path -LiteralPath (Join-Path $desktopPath 'Microcode.lnk')) { throw 'The NSIS uninstaller left its Desktop shortcut behind.' }
   if (Test-Path -LiteralPath $installPath) { throw 'The NSIS uninstaller left files in the selected install directory.' }
   if (-not (Test-Path -LiteralPath $homeMarker) -or -not (Test-Path -LiteralPath $appMarker)) { throw 'The NSIS uninstaller removed sessions, settings, or logs.' }
-  Write-Output 'NSIS_INSTALL_UPGRADE_UNINSTALL_SMOKE=passed; custom_directory=passed; path_with_spaces=passed; current_user_scope=passed; user_data_preserved=passed'
+
+  if (Test-Path -LiteralPath $rootInstallPath) { throw 'A matching drive-root installer smoke directory already exists.' }
+  $rootWritable = $false
+  try {
+    New-Item -ItemType Directory -Path $rootInstallPath -ErrorAction Stop | Out-Null
+    Remove-Item -LiteralPath $rootInstallPath -Force -ErrorAction Stop
+    $rootWritable = $true
+  } catch {
+    if (Test-Path -LiteralPath $rootInstallPath) { Remove-Item -LiteralPath $rootInstallPath -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+  if ($rootWritable) {
+    $packageInstaller = Join-Path ([System.IO.Path]::GetFullPath($PackageDirectory)) 'Install-Microcode.ps1'
+    if (-not (Test-Path -LiteralPath $packageInstaller -PathType Leaf)) { throw 'The release package is missing its PowerShell installer.' }
+    $stagePath = "$rootInstallPath.new-$PID"
+    $backupPath = "$rootInstallPath.previous-$PID"
+    try {
+      & $packageInstaller -InstallRoot $rootInstallPath -InstallerManaged
+      if (-not (Test-Path -LiteralPath (Join-Path $rootInstallPath 'Microcode.exe') -PathType Leaf)) { throw 'The drive-root install smoke did not create Microcode.exe.' }
+      $driveRootParentSmoke = 'passed'
+    } finally {
+      foreach ($path in @($rootInstallPath, $stagePath, $backupPath)) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+      }
+    }
+  }
+  Write-Output "NSIS_INSTALL_UPGRADE_UNINSTALL_SMOKE=passed; custom_directory=passed; path_with_spaces=passed; drive_root_parent=$driveRootParentSmoke; current_user_scope=passed; user_data_preserved=passed"
 } finally {
   if (Test-Path -LiteralPath (Join-Path $installPath 'Uninstall Microcode.exe')) {
     try { Start-Process -FilePath (Join-Path $installPath 'Uninstall Microcode.exe') -ArgumentList '/S' -WindowStyle Hidden -Wait | Out-Null } catch { }

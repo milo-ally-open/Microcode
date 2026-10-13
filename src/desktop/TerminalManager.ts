@@ -11,9 +11,32 @@ interface TerminalProcess {
   readonly exited: Promise<number>
 }
 
-function clampDimensions(cols: number, rows: number): { readonly cols: number; readonly rows: number } {
-  return { cols: Math.max(20, Math.min(300, Math.floor(cols))), rows: Math.max(5, Math.min(100, Math.floor(rows))) }
+async function terminateWindowsProcessTree(processId: number): Promise<void> {
+  let killer: Bun.Subprocess
+  try {
+    killer = Bun.spawn(['taskkill.exe', '/PID', String(processId), '/T', '/F'], {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+      windowsHide: true,
+    })
+  } catch {
+    return
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    killer.exited,
+    new Promise<undefined>((resolve) => { timeout = setTimeout(() => resolve(undefined), 5_000) }),
+  ])
+  if (timeout) clearTimeout(timeout)
+  if (killer.exitCode === null && killer.signalCode === null) killer.kill('SIGKILL')
 }
+
+function clampDimensions(cols: number, rows: number): { readonly cols: number; readonly rows: number } {
+  return { cols: Math.max(1, Math.min(300, Math.floor(cols))), rows: Math.max(1, Math.min(100, Math.floor(rows))) }
+}
+
+const DEFAULT_GIT_BASH_PROMPT = String.raw`\[\e[32m\]\u@\h \[\e[35m\]$MSYSTEM \[\e[33m\]\w\[\e[36m\]$(__git_ps1)\[\e[0m\]\n$ `
 
 async function shellCommand(workspace: string): Promise<{ readonly command: string[]; readonly cwd?: string }> {
   if (process.platform !== 'win32') return { command: [Bun.which('bash') ?? 'bash', '--login'], cwd: workspace }
@@ -48,12 +71,20 @@ export class DesktopTerminalManager {
     const details = workspace ? await stat(workspace).catch(() => null) : null
     if (!details?.isDirectory()) throw new Error('The project folder is no longer available for the terminal.')
 
+    const usesPackagedGitBash = process.platform === 'win32' && Boolean(process.env.MICROCODE_GIT_BASH_EXECUTABLE)
     const { command, cwd } = await shellCommand(workspace)
     const terminalId = randomUUID()
     const dimensions = clampDimensions(cols, rows)
     const child = Bun.spawn(command, {
       ...(cwd ? { cwd } : {}),
-      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        ...(usesPackagedGitBash
+          ? { MSYS2_PS1: process.env.MSYS2_PS1 || DEFAULT_GIT_BASH_PROMPT }
+          : {}),
+      },
       terminal: {
         ...dimensions,
         name: 'xterm-256color',
@@ -86,6 +117,7 @@ export class DesktopTerminalManager {
   async close(terminalId: string): Promise<void> {
     const entry = this.terminals.get(terminalId)
     if (!entry) return
+    if (process.platform === 'win32') await terminateWindowsProcessTree(entry.process.pid)
     if (entry.process.exitCode !== null || entry.process.signalCode !== null) {
       this.finish(terminalId, entry, entry.process.exitCode ?? 1)
       return

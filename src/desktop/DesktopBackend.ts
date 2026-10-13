@@ -1,6 +1,7 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { Api, AuthType, ImageContent } from '@earendil-works/pi-ai'
+import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth'
 import type { PermissionMode } from '../permissions/types.ts'
 import { ensureBootstrapMacro } from '../macro.ts'
 import { GitRepository } from '../git/GitRepository.ts'
@@ -16,6 +17,10 @@ import { DesktopTerminalManager } from './TerminalManager.ts'
 import { DesktopRequestError, isLikelySecretFile, redactDisplayText } from './security.ts'
 import { DesktopModelSettings } from './settings.ts'
 import { openProviderAuthUrl, promptForProviderAuth, showDeviceCode, type ProviderAuthPrompt } from './authPrompt.ts'
+
+// The desktop backend is bundled as its own Bun executable entry point. Register
+// statically bundled OAuth implementations here as well as in the CLI entry.
+registerBunOAuthFlows()
 
 const MAX_DIFF_BYTES = 512 * 1024
 const MAX_UNTRACKED_BYTES = 256 * 1024
@@ -37,6 +42,13 @@ async function createDesktopRuntime(cwd: string): Promise<DesktopRuntimeFactoryR
 
 function errorText(error: unknown): string {
   return redactDisplayText(error instanceof Error ? error.message : String(error))
+}
+
+function authSmokeDiagnostic(error: unknown): string {
+  return errorText(error)
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/\b(code|state|verifier|challenge|access_token|refresh_token)=\S+/gi, '$1=[redacted]')
+    .slice(0, 240)
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -428,13 +440,16 @@ export class DesktopBackend {
       const provider = settings.providers.find((item) => item.id === providerId)
       if (!provider?.configured) throw new Error('Sign-in did not produce a verified provider credential.')
       return Object.freeze({ status: 'signed_in', settings })
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted && !notificationFailed) {
         return Object.freeze({ status: 'cancelled', settings: await this.getSettingsSnapshot() })
       }
+      const smokeDiagnostic = process.env.MICROCODE_DESKTOP_SMOKE_TEST === '1'
+        ? ` (${authSmokeDiagnostic(error)})`
+        : ''
       const message = notificationFailed
         ? 'The system browser or native sign-in prompt could not be opened.'
-        : 'Provider sign-in failed. Review the provider status and try again.'
+        : `Provider sign-in failed. Review the provider status and try again.${smokeDiagnostic}`
       throw new DesktopRequestError('backend_unavailable', message)
     } finally {
       if (this.authController === controller) this.authController = undefined
