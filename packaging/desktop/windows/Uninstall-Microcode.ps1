@@ -6,7 +6,20 @@ $installPath = [System.IO.Path]::GetFullPath($PSScriptRoot)
 if ([System.IO.Path]::GetFileName($installPath) -ne 'Microcode' -or -not (Test-Path (Join-Path $installPath 'Microcode.exe')) -or -not (Test-Path (Join-Path $installPath 'release-manifest.json'))) {
   throw 'Refusing to uninstall from an unexpected directory.'
 }
-if ([System.Diagnostics.Process]::GetProcessesByName('Microcode').Count -gt 0) { throw 'Close Microcode before uninstalling it.' }
+$desktopExecutable = [System.IO.Path]::GetFullPath((Join-Path $installPath 'Microcode.exe'))
+$desktopIsRunning = $false
+foreach ($process in [System.Diagnostics.Process]::GetProcessesByName('Microcode')) {
+  try {
+    if ([string]::Equals([System.IO.Path]::GetFullPath($process.MainModule.FileName), $desktopExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $desktopIsRunning = $true
+    }
+  } catch {
+    # Another process named Microcode can be the CLI, which is independent of this desktop install.
+  } finally {
+    $process.Dispose()
+  }
+}
+if ($desktopIsRunning) { throw 'Close Microcode Desktop before uninstalling it.' }
 
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MicrocodeDesktop'
 if (Test-Path $uninstallKey) {

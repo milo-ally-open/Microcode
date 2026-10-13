@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { indexReleaseFiles, verifyReleaseFiles } from '../../packaging/desktop/manifest.ts'
+import { indexReleaseFiles, verifyReleaseFiles } from '../../packaging/desktop/windows/manifest.ts'
 
 describe('desktop release manifest inventory', () => {
   test('records sorted portable paths and verifies hashes and sizes', async () => {

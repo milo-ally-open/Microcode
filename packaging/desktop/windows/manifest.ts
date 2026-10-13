@@ -33,6 +33,8 @@ export interface DesktopReleaseManifest {
     readonly electron: '44.7.0'
     readonly gitForWindows: '2.54.0.windows.1'
     readonly gitArchiveSha256: string
+    readonly nsis: '3.13'
+    readonly nsisArchiveSha256: string
     readonly desktopTransportProtocolVersion: number
     readonly runtimeProtocolVersion: number
   }

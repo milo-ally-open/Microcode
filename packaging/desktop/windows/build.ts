@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
-import { cp, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, delimiter, dirname, join, relative, resolve } from 'node:path'
 import { indexReleaseFiles, verifyReleaseFiles, type DesktopReleaseManifest } from './manifest.ts'
-import { DESKTOP_TRANSPORT_PROTOCOL_VERSION } from '../../src/desktop/protocol.ts'
-import { RUNTIME_PROTOCOL_VERSION } from '../../src/runtime/protocol.ts'
+import { DESKTOP_TRANSPORT_PROTOCOL_VERSION } from '../../../src/desktop/protocol.ts'
+import { RUNTIME_PROTOCOL_VERSION } from '../../../src/runtime/protocol.ts'
 
-const projectRoot = resolve(import.meta.dir, '../..')
+const projectRoot = resolve(import.meta.dir, '../../..')
 const packageVersionData = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')) as { readonly version: string }
 const packageVersion = packageVersionData.version
 const gitLock = JSON.parse(await readFile(join(import.meta.dir, 'runtime-lock.json'), 'utf8')) as {
@@ -18,6 +18,7 @@ const gitLock = JSON.parse(await readFile(join(import.meta.dir, 'runtime-lock.js
     readonly download: string
   }
   readonly gitForWindows: { readonly version: string; readonly archive: string; readonly sha256: string; readonly download: string }
+  readonly nsis: { readonly version: string; readonly archive: string; readonly sha256: string; readonly download: string }
 }
 
 if (Bun.version !== '1.3.14') throw new Error(`Windows release builds require Bun 1.3.14; found ${Bun.version}.`)
@@ -37,15 +38,15 @@ function readOutputDirectory(): string {
 }
 
 const outputDirectory = readOutputDirectory()
-const outputArchive = `${outputDirectory}.zip`
-const outputChecksum = `${outputArchive}.sha256`
 const releaseParent = dirname(outputDirectory)
+const outputInstaller = join(releaseParent, `${basename(outputDirectory)}-setup.exe`)
+const outputInstallerChecksum = `${outputInstaller}.sha256`
 const relativeOutput = relative(projectRoot, outputDirectory)
 if (relativeOutput.startsWith('..') || resolve(projectRoot, relativeOutput) !== outputDirectory) {
   throw new Error('Windows release output must stay under the target repository.')
 }
 await mkdir(releaseParent, { recursive: true })
-for (const path of [outputDirectory, outputArchive, outputChecksum]) {
+for (const path of [outputDirectory, outputInstaller, outputInstallerChecksum]) {
   try {
     await stat(path)
     throw new Error(`Refusing to overwrite existing release output: ${path}`)
@@ -55,9 +56,16 @@ for (const path of [outputDirectory, outputArchive, outputChecksum]) {
   }
 }
 
-const validationDirectory = await mkdtemp(join(releaseParent, '.microcode-validation-'))
-const packageDirectory = await mkdtemp(join(releaseParent, '.microcode-candidate-'))
+let validationDirectory: string | undefined
+let packageDirectory: string | undefined
+let buildSucceeded = false
+try {
+validationDirectory = await mkdtemp(join(releaseParent, '.microcode-validation-'))
+packageDirectory = await mkdtemp(join(releaseParent, '.microcode-candidate-'))
+const validationRoot = validationDirectory
+const packageRoot = packageDirectory
 const runtimeCache = join(projectRoot, 'dist', 'toolchain', 'desktop-windows-x64')
+const brandDirectory = join(validationRoot, 'installer-brand')
 await mkdir(runtimeCache, { recursive: true })
 
 function safeOutput(value: string): string {
@@ -65,6 +73,26 @@ function safeOutput(value: string): string {
     .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
     .replace(/((?:api.?key|access.?token|refresh.?token|secret|password|authorization|credential)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[redacted]')
+}
+
+function nsisPath(value: string): string {
+  if (value.includes('"') || /[\r\n]/.test(value)) throw new Error(`NSIS paths may not contain quotes or line breaks: ${value}`)
+  return value.replaceAll('$', '$$').replaceAll('/', '\\')
+}
+
+async function writeUninstallerFileList(directory: string, files: DesktopReleaseManifest['files']): Promise<void> {
+  const parentDirectories = new Set<string>()
+  const commands = files.map(({ path }) => {
+    const parts = path.split('/')
+    for (let index = 1; index < parts.length; index++) parentDirectories.add(parts.slice(0, index).join('/'))
+    return `Delete "$INSTDIR\\${nsisPath(path)}"`
+  })
+  const orderedDirectories = [...parentDirectories].sort((left, right) => {
+    const depth = right.split('/').length - left.split('/').length
+    return depth || right.localeCompare(left)
+  })
+  commands.push(...orderedDirectories.map((path) => `RMDir "$INSTDIR\\${nsisPath(path)}"`))
+  await writeFile(directory, `${commands.join('\n')}\n`)
 }
 
 async function run(command: readonly string[], options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv } = {}): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
@@ -98,7 +126,12 @@ function windowsPath(path: string): string {
 
 async function runPowerShell(script: string, parameters: Readonly<Record<string, string>>): Promise<string> {
   const args = ['powershell.exe', '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', windowsPath(script)]
-  for (const [name, value] of Object.entries(parameters)) args.push(`-${name}`, windowsPath(value))
+  const pathParameters = new Set([
+    'RepositoryRoot', 'CacheRoot', 'Application', 'SmokeRoot', 'SourceDirectory', 'OutputFile', 'ArchivePath',
+    'SetupExecutable', 'InstallRoot', 'OutputDirectory', 'CompilerPath', 'ScriptPath', 'PackageDirectory',
+    'UninstallFiles', 'BrandIcon', 'WizardBitmap', 'SmokeDefaultInstallDirectory', 'SmokeStartMenuPath', 'SmokeDesktopPath', 'InstallDirectory',
+  ])
+  for (const [name, value] of Object.entries(parameters)) args.push(`-${name}`, pathParameters.has(name) ? windowsPath(value) : value)
   const result = await run(args, { env: buildEnvironment })
   if (result.exitCode !== 0) failProcess(basename(script), result)
   return result.stdout.trim()
@@ -155,7 +188,7 @@ for (const name of Object.keys(environment)) {
 const buildEnvironment = environment
 
 console.log(`Building Microcode Desktop ${packageVersion} for Windows x64 with Bun ${Bun.version}.`)
-await runPowerShell(join(import.meta.dir, 'Prepare-WindowsRuntimes.ps1'), {
+await runPowerShell(join(import.meta.dir, 'Prepare-WindowsToolchain.ps1'), {
   RepositoryRoot: projectRoot,
   CacheRoot: runtimeCache,
 })
@@ -165,6 +198,10 @@ const electronDirectory = join(runtimeCache, 'electron-44.7.0-win32-x64')
 const bunDirectory = join(runtimeCache, 'bun-1.3.14-windows-x64')
 const bunExecutable = join(bunDirectory, 'bun-windows-x64', 'bun.exe')
 const gitDirectory = join(runtimeCache, `git-for-windows-${gitLock.gitForWindows.version}-x64`)
+const nsisDirectory = join(runtimeCache, `nsis-${gitLock.nsis.version}`, `nsis-${gitLock.nsis.version}`)
+const nsisCompiler = join(nsisDirectory, 'makensis.exe')
+await stat(nsisCompiler)
+console.log(`Verified the pinned NSIS ${gitLock.nsis.version} setup compiler.`)
 const gitExecutable = process.platform === 'win32' ? join(gitDirectory, 'cmd', 'git.exe') : 'git'
 const gitStateBeforeChecks = await gitState(gitExecutable)
 const sourceDigestBeforeChecks = await sourceTreeDigest(projectRoot)
@@ -182,7 +219,7 @@ if (testRun.exitCode !== 0) failProcess('bun run test', testRun)
 const testResults = listFromTestOutput(`${testRun.stdout}\n${testRun.stderr}`)
 console.log(`Tests passed: ${testResults.passed}; skipped: ${testResults.skipped}; failed: 0.`)
 
-const cliOutput = join(validationDirectory, 'microcode.exe')
+const cliOutput = join(validationRoot, 'microcode.exe')
 const cliBuild = await run([process.execPath, 'run', 'build', '--no-install', '--out', cliOutput, '--target', 'bun-windows-x64'], { env: buildEnvironment })
 if (cliBuild.exitCode !== 0) failProcess('CLI/TUI production build', cliBuild)
 await stat(cliOutput)
@@ -191,16 +228,20 @@ console.log('CLI/TUI production build passed for bun-windows-x64.')
 const electronFiles = await readdir(electronDirectory)
 for (const entry of electronFiles) {
   const source = join(electronDirectory, entry)
-  const destination = join(packageDirectory, entry)
+  const destination = join(packageRoot, entry)
   if (entry === 'electron.exe') continue
   await cp(source, destination, { recursive: true, errorOnExist: true })
 }
-await cp(join(electronDirectory, 'electron.exe'), join(packageDirectory, 'Microcode.exe'))
-const resourcesDirectory = join(packageDirectory, 'resources')
+await cp(join(electronDirectory, 'electron.exe'), join(packageRoot, 'Microcode.exe'))
+const resourcesDirectory = join(packageRoot, 'resources')
 await mkdir(resourcesDirectory, { recursive: true })
 const appDirectory = join(resourcesDirectory, 'app')
 await mkdir(appDirectory, { recursive: true })
 await cp(gitDirectory, join(resourcesDirectory, 'git'), { recursive: true, errorOnExist: true })
+await runPowerShell(join(import.meta.dir, 'Generate-InstallerBrandAssets.ps1'), {
+  LogoPath: join(projectRoot, 'assets', 'microcode-logo-light.png'),
+  OutputDirectory: brandDirectory,
+})
 
 const mainBuild = await Bun.build({
   entrypoints: [join(projectRoot, 'src/desktop/main.ts')],
@@ -245,13 +286,14 @@ for (const result of [mainBuild, preloadBuild, rendererBuild, backendBuild]) {
 await Promise.all([
   cp(bunExecutable, join(resourcesDirectory, 'microcode-backend.exe')),
   cp(bunLicensePath, join(resourcesDirectory, 'BUN-LICENSE.md')),
+  cp(join(brandDirectory, 'Microcode.ico'), join(resourcesDirectory, 'microcode.ico')),
   cp(join(projectRoot, 'node_modules/@napi-rs/keyring-win32-x64-msvc/keyring.win32-x64-msvc.node'), join(resourcesDirectory, 'keyring.win32-x64-msvc.node')),
   cp(join(projectRoot, 'src/desktop/renderer/index.html'), join(appDirectory, 'index.html')),
   cp(join(projectRoot, 'src/desktop/renderer/style.css'), join(appDirectory, 'style.css')),
   cp(join(projectRoot, 'node_modules/@xterm/xterm/css/xterm.css'), join(appDirectory, 'xterm.css')),
   writeFile(join(appDirectory, 'package.json'), `${JSON.stringify({ name: 'microcode-desktop', productName: 'Microcode', version: packageVersion, main: 'main.mjs', private: true }, null, 2)}\n`),
-  cp(join(import.meta.dir, 'Install-Microcode.ps1'), join(packageDirectory, 'Install-Microcode.ps1')),
-  cp(join(import.meta.dir, 'Uninstall-Microcode.ps1'), join(packageDirectory, 'Uninstall-Microcode.ps1')),
+  cp(join(import.meta.dir, 'Install-Microcode.ps1'), join(packageRoot, 'Install-Microcode.ps1')),
+  cp(join(import.meta.dir, 'Uninstall-Microcode.ps1'), join(packageRoot, 'Uninstall-Microcode.ps1')),
 ])
 
 const manifestWithoutFiles: Omit<DesktopReleaseManifest, 'files'> = {
@@ -274,6 +316,8 @@ const manifestWithoutFiles: Omit<DesktopReleaseManifest, 'files'> = {
     electron: '44.7.0',
     gitForWindows: '2.54.0.windows.1',
     gitArchiveSha256: gitLock.gitForWindows.sha256,
+    nsis: gitLock.nsis.version,
+    nsisArchiveSha256: gitLock.nsis.sha256,
     desktopTransportProtocolVersion: DESKTOP_TRANSPORT_PROTOCOL_VERSION,
     runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
   },
@@ -286,28 +330,26 @@ const manifestWithoutFiles: Omit<DesktopReleaseManifest, 'files'> = {
     installationUpgradeUninstallSmoke: { status: 'pending' },
   },
 }
-const releaseFiles = await indexReleaseFiles(packageDirectory)
+const releaseFiles = await indexReleaseFiles(packageRoot)
 let manifest: DesktopReleaseManifest = { ...manifestWithoutFiles, files: releaseFiles }
 let manifestHash = ''
 const writeCandidateManifest = async (): Promise<void> => {
   const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`
   manifestHash = createHash('sha256').update(manifestBytes).digest('hex')
-  await writeFile(join(packageDirectory, 'release-manifest.json'), manifestBytes)
-  await writeFile(join(packageDirectory, 'release-manifest.sha256'), `${manifestHash}  release-manifest.json\n`)
+  await writeFile(join(packageRoot, 'release-manifest.json'), manifestBytes)
+  await writeFile(join(packageRoot, 'release-manifest.sha256'), `${manifestHash}  release-manifest.json\n`)
 }
 await writeCandidateManifest()
-await verifyReleaseFiles(packageDirectory, manifest.files)
+await verifyReleaseFiles(packageRoot, manifest.files)
 
-const smokeLog = await runPowerShell(join(import.meta.dir, 'Smoke-PackagedBackend.ps1'), {
-  Application: join(packageDirectory, 'Microcode.exe'),
-  SmokeRoot: join(validationDirectory, 'packaged-backend'),
+const uninstallFileList = join(validationRoot, 'uninstall-files.nsh')
+await writeUninstallerFileList(uninstallFileList, manifest.files)
+
+const smokeLog = await runPowerShell(join(projectRoot, 'tests', 'packaging', 'windows', 'Smoke-PackagedBackend.ps1'), {
+  Application: join(packageRoot, 'Microcode.exe'),
+  SmokeRoot: join(validationRoot, 'packaged-backend'),
 })
 console.log(smokeLog)
-const installSmoke = await runPowerShell(join(import.meta.dir, 'Smoke-InstallUpgradeUninstall.ps1'), {
-  PackageDirectory: packageDirectory,
-  SmokeRoot: join(validationDirectory, 'installation'),
-})
-console.log(installSmoke)
 
 manifest = {
   ...manifest,
@@ -322,26 +364,87 @@ manifest = {
       secretScan: 'passed',
       orphanProcessScan: 'passed',
     },
+  },
+}
+await writeCandidateManifest()
+await verifyReleaseFiles(packageRoot, manifest.files)
+
+const candidateInstaller = join(validationRoot, basename(outputInstaller))
+const smokeId = createHash('sha256').update(validationRoot).digest('hex').slice(0, 12)
+const smokeRoot = join(validationRoot, 'installation')
+const smokeProfile = join(smokeRoot, 'Windows profile with spaces')
+const smokeInstallDirectory = join(smokeRoot, 'Chosen install location with spaces')
+const smokeStartMenuPath = join(smokeProfile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', `Microcode Smoke ${smokeId}`)
+const smokeDesktopPath = join(smokeProfile, 'Desktop')
+await runPowerShell(join(import.meta.dir, 'Compile-WindowsSetup.ps1'), {
+  CompilerPath: nsisCompiler,
+  ScriptPath: join(import.meta.dir, 'Microcode-Setup.nsi'),
+  PackageDirectory: packageRoot,
+  UninstallFiles: uninstallFileList,
+  BrandIcon: join(brandDirectory, 'Microcode.ico'),
+  WizardBitmap: join(brandDirectory, 'Microcode-Wizard.bmp'),
+  OutputFile: candidateInstaller,
+  ProductVersion: packageVersion,
+  BuildMode: 'smoke',
+  SmokeId: smokeId,
+  SmokeDefaultInstallDirectory: smokeInstallDirectory,
+  SmokeStartMenuPath: smokeStartMenuPath,
+  SmokeDesktopPath: smokeDesktopPath,
+})
+const installSmoke = await runPowerShell(join(projectRoot, 'tests', 'packaging', 'windows', 'Smoke-InstallUpgradeUninstall.ps1'), {
+  SetupExecutable: candidateInstaller,
+  SmokeRoot: smokeRoot,
+  SmokeId: smokeId,
+  SmokeStartMenuPath: smokeStartMenuPath,
+  SmokeDesktopPath: smokeDesktopPath,
+  InstallDirectory: smokeInstallDirectory,
+  ProductVersion: packageVersion,
+})
+console.log(installSmoke)
+
+manifest = {
+  ...manifest,
+  validation: {
+    ...manifest.validation,
     installationUpgradeUninstallSmoke: { status: 'passed', userDataPreserved: true },
   },
 }
 await writeCandidateManifest()
-await verifyReleaseFiles(packageDirectory, manifest.files)
+await verifyReleaseFiles(packageRoot, manifest.files)
 
-await runPowerShell(join(import.meta.dir, 'Create-ReleaseArchive.ps1'), {
-  SourceDirectory: packageDirectory,
-  OutputFile: outputArchive,
+await runPowerShell(join(import.meta.dir, 'Compile-WindowsSetup.ps1'), {
+  CompilerPath: nsisCompiler,
+  ScriptPath: join(import.meta.dir, 'Microcode-Setup.nsi'),
+  PackageDirectory: packageDirectory,
+  UninstallFiles: uninstallFileList,
+  BrandIcon: join(brandDirectory, 'Microcode.ico'),
+  WizardBitmap: join(brandDirectory, 'Microcode-Wizard.bmp'),
+  OutputFile: outputInstaller,
+  ProductVersion: packageVersion,
+  BuildMode: 'release',
 })
-const archiveHash = createHash('sha256').update(await readFile(outputArchive)).digest('hex')
-await writeFile(outputChecksum, `${archiveHash}  ${basename(outputArchive)}\n`)
-const archiveVerification = await runPowerShell(join(import.meta.dir, 'Verify-ReleaseArchive.ps1'), {
-  ArchivePath: outputArchive,
-})
-const archiveSize = (await stat(outputArchive)).size
-console.log(`Windows x64 candidate created: ${outputArchive}`)
-console.log(`Archive SHA-256: ${archiveHash}`)
-console.log(`Archive checksum: ${outputChecksum}`)
-console.log(`Archive size: ${archiveSize} bytes; release manifest SHA-256: ${manifestHash}`)
-console.log(archiveVerification)
-console.log(`Local validation evidence: ${validationDirectory}`)
+const installerHash = createHash('sha256').update(await readFile(outputInstaller)).digest('hex')
+await writeFile(outputInstallerChecksum, `${installerHash}  ${basename(outputInstaller)}\n`)
+const installerSize = (await stat(outputInstaller)).size
+buildSucceeded = true
+console.log(`Windows setup wizard created: ${outputInstaller}`)
+console.log(`Installer size: ${installerSize} bytes; release manifest SHA-256: ${manifestHash}`)
+console.log(`Installer SHA-256: ${installerHash}`)
+console.log(`Installer checksum: ${outputInstallerChecksum}`)
 console.log(`Code signing is not configured. This artifact is an unsigned candidate; automatic updates are disabled.`)
+} finally {
+  const temporaryPaths = [validationDirectory, packageDirectory].filter((path): path is string => Boolean(path))
+  const cleanupResults = await Promise.allSettled(temporaryPaths.map((path) => rm(path, { recursive: true, force: true })))
+  if (!buildSucceeded) {
+    cleanupResults.push(...await Promise.allSettled([
+      rm(outputInstaller, { force: true }),
+      rm(outputInstallerChecksum, { force: true }),
+    ]))
+  }
+  const cleanupFailures = cleanupResults.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+  if (cleanupFailures.length > 0) {
+    const message = `Could not remove ${cleanupFailures.length} Windows release build temporary path(s).`
+    if (buildSucceeded) throw new Error(message, { cause: cleanupFailures[0] })
+    console.error(message)
+  }
+}

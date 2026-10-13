@@ -208,6 +208,9 @@ function createMainWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#111416',
     title: 'Microcode',
+    icon: process.platform === 'win32'
+      ? (app.isPackaged ? join(process.resourcesPath, 'microcode.ico') : join(projectRoot, 'assets', 'microcode-logo-light.png'))
+      : undefined,
     webPreferences: {
       preload: join(mainDirectory, 'preload.cjs'),
       nodeIntegration: false,

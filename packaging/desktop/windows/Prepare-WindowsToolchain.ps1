@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $cache = [System.IO.Path]::GetFullPath($CacheRoot)
-$runtimeLock = Get-Content (Join-Path $repo 'packaging/desktop/runtime-lock.json') -Raw | ConvertFrom-Json
+$runtimeLock = Get-Content (Join-Path $repo 'packaging/desktop/windows/runtime-lock.json') -Raw | ConvertFrom-Json
 function Get-Sha256Hex {
   param([Parameter(Mandatory = $true)][string]$Path)
   $stream = [System.IO.File]::OpenRead($Path)
@@ -90,6 +90,30 @@ if (-not (Test-Path (Join-Path $gitDirectory 'bin/bash.exe'))) {
   }
 }
 
+$nsis = $runtimeLock.nsis
+if ($nsis.version -ne '3.13' -or $nsis.archive -ne 'nsis-3.13.zip' -or $nsis.sha256 -notmatch '^[0-9a-f]{64}$') {
+  throw 'The NSIS compiler lock is invalid.'
+}
+$nsisCache = Join-Path $cache "nsis-$($nsis.version)"
+$nsisArchive = Join-Path $nsisCache $nsis.archive
+$nsisDirectory = Join-Path $nsisCache "nsis-$($nsis.version)"
+$nsisCompiler = Join-Path $nsisDirectory 'makensis.exe'
+if (-not (Test-Path -LiteralPath $nsisCompiler -PathType Leaf)) {
+  New-Item -ItemType Directory -Path $nsisCache -Force | Out-Null
+  if (-not (Test-Path -LiteralPath $nsisArchive -PathType Leaf)) {
+    & curl.exe --fail --location --retry 3 --connect-timeout 20 --max-time 300 -o $nsisArchive $nsis.download
+    if ($LASTEXITCODE -ne 0) { throw "Could not download the pinned NSIS compiler (curl exit $LASTEXITCODE)." }
+  }
+  $actualHash = Get-Sha256Hex -Path $nsisArchive
+  if ($actualHash -ne $nsis.sha256) { throw 'The NSIS compiler archive failed its locked SHA-256 check.' }
+  if (Test-Path -LiteralPath $nsisDirectory) { throw "Incomplete cached NSIS extraction exists; inspect it before retrying: $nsisDirectory" }
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [System.IO.Compression.ZipFile]::ExtractToDirectory($nsisArchive, $nsisCache)
+  if (-not (Test-Path -LiteralPath $nsisCompiler -PathType Leaf)) { throw 'The NSIS archive did not contain makensis.exe.' }
+}
+$nsisVersionOutput = (& $nsisCompiler /VERSION | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $nsisVersionOutput -notmatch '3\.13') { throw 'The downloaded NSIS compiler does not match its locked version.' }
+
 Write-Output (ConvertTo-Json -Compress -InputObject @{
   electronVersion = $electronVersion
   electronDirectory = $electronDirectory
@@ -100,4 +124,8 @@ Write-Output (ConvertTo-Json -Compress -InputObject @{
   gitVersion = [string]$git.version
   gitDirectory = $gitDirectory
   gitArchiveSha256 = [string]$git.sha256
+  nsisVersion = [string]$nsis.version
+  nsisDirectory = $nsisDirectory
+  nsisCompiler = $nsisCompiler
+  nsisArchiveSha256 = [string]$nsis.sha256
 })

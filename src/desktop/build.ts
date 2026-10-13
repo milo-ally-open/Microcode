@@ -54,8 +54,24 @@ await Promise.all([
 console.log(`Desktop renderer: ${rendererOutput}`)
 
 if (process.argv.slice(2).includes('--run')) {
+  const electronInstall = Bun.spawn(['node', join(projectRoot, 'node_modules', 'electron', 'install.js')], {
+    cwd: projectRoot,
+    env: { ...process.env, NODE_USE_ENV_PROXY: '1' },
+    stdin: 'inherit',
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  const installExitCode = await electronInstall.exited
+  if (installExitCode !== 0) {
+    throw new Error(`Electron installation failed (exit code ${installExitCode}).`)
+  }
+
   const electron = Bun.spawn(['electron', join(outputDirectory, 'main.mjs')], {
     cwd: projectRoot,
+    env: {
+      ...process.env,
+      MICROCODE_BUN_EXECUTABLE: process.env.MICROCODE_BUN_EXECUTABLE || process.execPath,
+    },
     stdin: 'inherit',
     stdout: 'inherit',
     stderr: 'inherit',

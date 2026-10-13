@@ -67,4 +67,4 @@ bun install --frozen-lockfile
 bun run desktop:release:windows
 ```
 
-This command requires Bun 1.3.14 and runs the typecheck, test suite, production builds, packaged backend/workspace/review/terminal smoke, isolated install/upgrade/uninstall smoke, and archive integrity checks before writing a ZIP and SHA-256 sidecar to `dist/releases/`. The application installer and manual Windows UI acceptance steps are documented in [`desktop/README.md`](desktop/README.md).
+This command requires Bun 1.3.14 and runs the typecheck, test suite, production builds, packaged backend/workspace/review/terminal smoke, and isolated install/upgrade/uninstall smoke before writing a branded Setup `.exe` and its SHA-256 sidecar to `dist/releases/`. Temporary candidate and validation directories are removed after the build; the verified toolchain cache stays under `dist/toolchain/`. The installer and manual Windows UI acceptance steps are documented in [`desktop/README.md`](desktop/README.md).

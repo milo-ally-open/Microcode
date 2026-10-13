@@ -14,7 +14,7 @@
     "dev": "bun run ./src/entry.ts",
     "desktop": "bun run ./src/desktop/build.ts --run",
     "desktop:build": "bun run ./src/desktop/build.ts",
-    "desktop:release:windows": "bun run ./packaging/desktop/build-windows.ts",
+    "desktop:release:windows": "bun run ./packaging/desktop/windows/build.ts",
     "build": "bun run build.ts",
     "package:cli": "bun run packaging/package-cli.ts",
     "typecheck": "tsc --noEmit",

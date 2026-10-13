@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs/Microcode')
+  [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs/Microcode'),
+  [switch]$InstallerManaged
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,7 +18,23 @@ function Get-Sha256Hex {
 if ($installPath.StartsWith($packagePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $packageRoot.StartsWith($installPath.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
   throw 'InstallRoot must be outside the extracted release package.'
 }
-if ([System.IO.Path]::GetFileName($installPath) -ne 'Microcode') { throw 'InstallRoot must end with the Microcode application directory name.' }
+if ([System.IO.Path]::GetPathRoot($installPath).TrimEnd('\') -eq $installPath.TrimEnd('\')) { throw 'InstallRoot may not be a filesystem root.' }
+if (Test-Path -LiteralPath $installPath) {
+  $destination = Get-Item -LiteralPath $installPath -Force
+  if (-not $destination.PSIsContainer) { throw 'InstallRoot already exists and is not a directory.' }
+  if (($destination.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'InstallRoot may not be a reparse point.' }
+  if (@(Get-ChildItem -LiteralPath $installPath -Force).Count -gt 0) {
+    $existingManifestPath = Join-Path $installPath 'release-manifest.json'
+    $existingExecutable = Join-Path $installPath 'Microcode.exe'
+    if (-not (Test-Path -LiteralPath $existingManifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $existingExecutable -PathType Leaf)) {
+      throw 'InstallRoot is not an existing Microcode installation; choose an empty folder.'
+    }
+    $existingManifest = Get-Content -LiteralPath $existingManifestPath -Raw | ConvertFrom-Json
+    if ($existingManifest.product -ne 'Microcode' -or $existingManifest.platform -ne 'windows') {
+      throw 'InstallRoot does not contain a recognized Microcode Desktop installation.'
+    }
+  }
+}
 if (-not [Environment]::Is64BitOperatingSystem) {
   throw 'Microcode Desktop requires 64-bit Windows.'
 }
@@ -30,7 +47,20 @@ if (($isWorkstation -and $osBuild -lt 26200) -or (-not $isWorkstation -and $osBu
   throw 'Microcode Desktop requires Windows 11 25H2 (build 26200) or Windows Server 2025 (build 26100), x64.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'Microcode.exe') -PathType Leaf)) { throw 'The release package is incomplete: Microcode.exe is missing.' }
-if ([System.Diagnostics.Process]::GetProcessesByName('Microcode').Count -gt 0) { throw 'Close Microcode before installing or upgrading.' }
+$desktopExecutable = [System.IO.Path]::GetFullPath((Join-Path $installPath 'Microcode.exe'))
+$desktopIsRunning = $false
+foreach ($process in [System.Diagnostics.Process]::GetProcessesByName('Microcode')) {
+  try {
+    if ([string]::Equals([System.IO.Path]::GetFullPath($process.MainModule.FileName), $desktopExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $desktopIsRunning = $true
+    }
+  } catch {
+    # Another process named Microcode can be the CLI, which is independent of the desktop install.
+  } finally {
+    $process.Dispose()
+  }
+}
+if ($desktopIsRunning) { throw 'Close Microcode Desktop before installing or upgrading.' }
 
 $packageRootItem = Get-Item -LiteralPath $packageRoot -Force
 if (($packageRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The release package directory may not be a reparse point.' }
@@ -103,24 +133,26 @@ try {
   }
   if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
 
-  $startMenu = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs'
-  New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
-  $shortcutPath = Join-Path $startMenu 'Microcode.lnk'
-  $shell = New-Object -ComObject WScript.Shell
-  $shortcut = $shell.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = Join-Path $installPath 'Microcode.exe'
-  $shortcut.WorkingDirectory = $installPath
-  $shortcut.Description = 'Microcode Desktop'
-  $shortcut.Save()
+  if (-not $InstallerManaged) {
+    $startMenu = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs'
+    New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
+    $shortcutPath = Join-Path $startMenu 'Microcode.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = Join-Path $installPath 'Microcode.exe'
+    $shortcut.WorkingDirectory = $installPath
+    $shortcut.Description = 'Microcode Desktop'
+    $shortcut.Save()
 
-  $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MicrocodeDesktop'
-  New-Item -Path $uninstallKey -Force | Out-Null
-  New-ItemProperty -Path $uninstallKey -Name DisplayName -Value 'Microcode Desktop' -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value ([string]$manifest.version) -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $installPath -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path $uninstallKey -Name DisplayIcon -Value (Join-Path $installPath 'Microcode.exe') -PropertyType String -Force | Out-Null
-  $uninstaller = Join-Path $installPath 'Uninstall-Microcode.ps1'
-  New-ItemProperty -Path $uninstallKey -Name UninstallString -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstaller`"" -PropertyType String -Force | Out-Null
+    $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MicrocodeDesktop'
+    New-Item -Path $uninstallKey -Force | Out-Null
+    New-ItemProperty -Path $uninstallKey -Name DisplayName -Value 'Microcode Desktop' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value ([string]$manifest.version) -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $installPath -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $uninstallKey -Name DisplayIcon -Value (Join-Path $installPath 'Microcode.exe') -PropertyType String -Force | Out-Null
+    $uninstaller = Join-Path $installPath 'Uninstall-Microcode.ps1'
+    New-ItemProperty -Path $uninstallKey -Name UninstallString -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstaller`"" -PropertyType String -Force | Out-Null
+  }
   Write-Output "Installed Microcode Desktop $($manifest.version) for the current user at $installPath"
   Write-Output 'User sessions, settings, and credentials are stored outside the install folder and are preserved.'
 } catch {

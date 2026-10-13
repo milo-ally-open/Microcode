@@ -12,5 +12,11 @@
     "archive": "PortableGit-2.54.0-64-bit.7z.exe",
     "sha256": "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
     "download": "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
+  },
+  "nsis": {
+    "version": "3.13",
+    "archive": "nsis-3.13.zip",
+    "sha256": "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8",
+    "download": "https://sourceforge.net/projects/nsis/files/NSIS%203/3.13/nsis-3.13.zip/download"
   }
 }
