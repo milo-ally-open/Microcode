@@ -4,7 +4,7 @@ The Windows x64 release produces one deliverable: a branded Setup wizard, plus i
 
 ## Build a candidate
 
-Run from the repository root with the project-pinned Bun 1.3.14 on an x64 Windows host or WSL attached to Windows:
+Run from the repository root with Bun 1.3.14 or newer on an x64 Windows host or WSL attached to Windows. The build uses the Bun version already installed on the host; it does not pin or modify that Bun installation:
 
 ```powershell
 bun --version
@@ -12,7 +12,7 @@ bun install --frozen-lockfile
 bun run desktop:release:windows
 ```
 
-The build downloads and verifies the locked Electron, Bun, PortableGit, and NSIS 3.13 toolchain into ignored `dist/toolchain/desktop-windows-x64/`. It does not install or modify Bun on the machine. The build checks TypeScript, runs `bun run test`, cross-compiles the CLI/TUI, packages the desktop app, smoke-tests the bundled backend, then runs the actual Setup wizard in silent mode through a selected directory, upgrade, and uninstall. It verifies that the Start Menu entry, Windows uninstall registration, and user data behave as expected. A failed gate stops release output creation. Temporary candidate and validation directories are removed after success or failure; the verified toolchain cache is retained for later builds.
+The build downloads and verifies the locked Electron, bundled Bun runtime, PortableGit, and NSIS 3.13 toolchain into ignored `dist/toolchain/desktop-windows-x64/`. Only the Bun runtime included with the application is pinned; the build host can use a newer Bun version. The build checks TypeScript, runs `bun run test`, cross-compiles the CLI/TUI, packages the desktop app, smoke-tests the bundled backend, then runs the actual Setup wizard in silent mode through a selected directory, upgrade, and uninstall. It verifies that the Start Menu entry, Windows uninstall registration, and user data behave as expected. A failed gate stops release output creation. Temporary candidate and validation directories are removed after success or failure; the verified toolchain cache is retained for later builds.
 
 The release command writes a versioned `*-setup.exe` and its `.sha256` sidecar under `dist/releases/`. Release outputs are never overwritten.
 

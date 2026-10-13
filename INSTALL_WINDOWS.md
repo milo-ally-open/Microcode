@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 安装并使用项目要求的 Bun **1.3.14**。构建脚本会检查 Bun 版本。
+- 使用 Bun **1.3.14 或更高版本**。构建机上的 Bun 不要求固定为某个版本，脚本会直接使用当前已安装的 Bun。
 - 已检出项目源码，并能访问网络，以便首次构建时下载锁定版本的打包工具链。
 
 ## 生成安装包
@@ -34,6 +34,6 @@ dist\releases\microcode-desktop-v0.1.0-windows-x64-setup.exe.sha256
 
 删除整个 `dist` 不会删除项目源码或当前安装的 Bun。再次运行构建命令时，脚本会重新创建 `dist`，并在 `dist\toolchain\desktop-windows-x64\` 下载和缓存打包所需的 Electron、Bun Windows 运行时、PortableGit 和 NSIS。首次重建需要网络，后续构建会复用该缓存。
 
-这里下载的 Bun Windows 运行时是随 Microcode 应用打包的组件，构建不会安装、升级或替换你用于运行命令的 Bun。
+这里下载的 Bun Windows 运行时是随 Microcode 应用打包的组件，并由 Windows runtime lock 单独固定。它与构建机上的 Bun 相互独立；构建不会安装、升级或替换你用于运行命令的 Bun。
 
 构建成功或失败后，候选包和验证目录会自动清理。工具链缓存与最终发布文件会保留在 `dist` 中。

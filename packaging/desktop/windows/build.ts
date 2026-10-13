@@ -21,7 +21,6 @@ const gitLock = JSON.parse(await readFile(join(import.meta.dir, 'runtime-lock.js
   readonly nsis: { readonly version: string; readonly archive: string; readonly sha256: string; readonly download: string }
 }
 
-if (Bun.version !== '1.3.14') throw new Error(`Windows release builds require Bun 1.3.14; found ${Bun.version}.`)
 if (process.arch !== 'x64') throw new Error(`Windows release builds require an x64 tool host; found ${process.arch}.`)
 const isWsl = process.platform === 'linux' && Boolean(process.env.WSL_DISTRO_NAME)
 if (process.platform !== 'win32' && !isWsl) throw new Error('Run the Windows x64 release build on Windows or from WSL attached to Windows.')
