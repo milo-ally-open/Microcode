@@ -143,7 +143,7 @@ Section "Microcode Desktop (required)" SecCore
     FileOpen $R0 "$TEMP\Microcode-Setup-${PROJECT_VERSION}.log" a
     FileWrite $R0 "PowerShell installer exit: $0$\r$1$\r$\n"
     FileClose $R0
-    Abort "Microcode could not be installed. See $TEMP\Microcode-Setup-${PROJECT_VERSION}.log for details."
+    Abort "Microcode could not be installed. If Microcode or its terminal is open, close it and retry. See $TEMP\Microcode-Setup-${PROJECT_VERSION}.log for details."
   ${EndIf}
 
   RMDir /r "$R0"

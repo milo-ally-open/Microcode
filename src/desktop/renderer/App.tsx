@@ -16,7 +16,8 @@ import type {
 import { applyRuntimeEvent, messageText } from './state.ts'
 import { buildProjectTree, labelProjectSessions, sessionsWithActiveDraft } from './project-tree.ts'
 import { buildReviewChangeTree, filterReviewChangeTree, type ReviewTreeNode } from './change-tree.ts'
-import { DESKTOP_TERMINAL_THEME } from './terminal-theme.ts'
+import { closeConversationTab, upsertConversationTab, type ConversationTab } from './conversation-tabs.ts'
+import { DESKTOP_TERMINAL_FONT_FAMILY, DESKTOP_TERMINAL_THEME } from './terminal-theme.ts'
 import { normalizeTerminalDimensions } from './terminal-dimensions.ts'
 import { encodePastedImage, getPastedImageFiles, MAX_DESKTOP_IMAGE_ATTACHMENTS } from './image-attachments.ts'
 import { redactDisplayText, redactDisplayValue } from '../security.ts'
@@ -398,7 +399,7 @@ function TerminalDrawer({ workspace, active, onError }: { workspace: string; act
       allowProposedApi: false,
       cursorBlink: true,
       drawBoldTextInBrightColors: true,
-      fontFamily: 'Cascadia Code, Consolas, "DM Mono", monospace',
+      fontFamily: DESKTOP_TERMINAL_FONT_FAMILY,
       fontSize: 12,
       scrollback: 5000,
       theme: DESKTOP_TERMINAL_THEME,
@@ -535,6 +536,10 @@ export function App() {
   const [recentProjects, setRecentProjects] = useState<readonly DesktopProjectRef[]>([])
   const [snapshot, setSnapshot] = useState<DesktopBackendSnapshot | null>(null)
   const [sessions, setSessions] = useState<readonly SessionRow[]>([])
+  const [conversationTabState, setConversationTabState] = useState<{
+    readonly workspace: string | null
+    readonly tabs: readonly ConversationTab[]
+  }>({ workspace: null, tabs: [] })
   const [models, setModels] = useState<readonly DesktopModelOption[]>([])
   const [review, setReview] = useState<DesktopReviewSnapshot | null>(null)
   const [diff, setDiff] = useState<DesktopFileDiff | null>(null)
@@ -565,6 +570,8 @@ export function App() {
   const messages = runtime?.messages ?? []
   const currentMode = runtime?.agent.permission.mode ?? 'interactive'
   const modelValue = useMemo(() => currentModelValue(snapshot, models), [snapshot, models])
+  const activeConversationId = runtime?.session.id ?? (runtime?.session.draft ? 'active-draft' : null)
+  const openTabs = conversationTabState.workspace === snapshot?.workspace ? conversationTabState.tabs : []
 
   const loadSessions = async () => {
     if (!snapshot?.workspace) { setSessions([]); return }
@@ -702,6 +709,22 @@ export function App() {
   }, [snapshot?.workspace])
 
   useEffect(() => {
+    const workspace = snapshot?.workspace
+    const session = runtime?.session
+    if (!workspace || !session) {
+      if (conversationTabState.workspace !== null) setConversationTabState({ workspace: null, tabs: [] })
+      return
+    }
+    const id = session.id ?? (session.draft ? 'active-draft' : null)
+    if (!id) return
+    const title = session.title?.trim() || (session.draft ? 'New conversation' : `Conversation · ${id.slice(0, 8)}`)
+    setConversationTabState((current) => {
+      const tabs = current.workspace === workspace ? current.tabs : []
+      return { workspace, tabs: upsertConversationTab(tabs, { id, title }) }
+    })
+  }, [snapshot?.workspace, runtime?.session.id, runtime?.session.draft, runtime?.session.title])
+
+  useEffect(() => {
     if (!snapshot?.workspace) return
     setExpandedProjects((current) => new Set(current).add(snapshot.workspace!))
   }, [snapshot?.workspace])
@@ -740,6 +763,19 @@ export function App() {
       setTools({})
       setOptimisticPrompt(null)
     } catch (error) { setErrorNotice(error instanceof Error ? error.message : String(error)) }
+  }
+
+  const closeConversation = async (sessionId: string) => {
+    const workspace = snapshot?.workspace
+    if (!workspace || running) return
+    const result = closeConversationTab(openTabs, sessionId, activeConversationId)
+    setConversationTabState({ workspace, tabs: result.tabs })
+    if (activeConversationId !== sessionId) return
+    if (result.selectedId && result.selectedId !== 'active-draft') {
+      await selectSession(result.selectedId)
+    } else {
+      await createSession()
+    }
   }
 
   const sendPrompt = async () => {
@@ -835,6 +871,11 @@ export function App() {
 
   const sessionsForUi = labelProjectSessions(sessionsWithActiveDraft(sessions, runtime?.session.draft === true))
   const projectsForUi = buildProjectTree(recentProjects, snapshot?.workspace ?? null, sessionsForUi, workspaceName)
+  const sessionTitles = new Map(sessionsForUi.map((session) => [session.id, session.displayTitle || session.title || 'Conversation']))
+  const tabsForUi = openTabs.map((tab) => ({
+    ...tab,
+    title: tab.id === 'active-draft' ? 'New conversation' : sessionTitles.get(tab.id) || tab.title,
+  }))
   const title = runtime?.session.title || (runtime?.session.draft ? 'New conversation' : 'Conversation')
   const messageCount = messages.filter((message) => {
     const role = object(message)?.role
@@ -913,6 +954,34 @@ export function App() {
             <button className="header-action open-project" onClick={() => void chooseWorkspace()} type="button"><span>▱</span>Open folder</button>
           </div>
         </header>
+
+        {snapshot?.workspace && <nav className="conversation-tabbar" role="tablist" aria-label="Open conversations">
+          {tabsForUi.map((tab) => {
+            const selected = activeConversationId === tab.id
+            return <div className={`conversation-tab ${selected ? 'selected' : ''}`} key={tab.id}>
+              <button
+                className="conversation-tab-select"
+                role="tab"
+                aria-selected={selected}
+                title={tab.title}
+                onClick={() => { if (!selected && tab.id !== 'active-draft') void selectSession(tab.id) }}
+                type="button"
+              >
+                <span className="conversation-tab-icon" aria-hidden="true">◌</span>
+                <span className="conversation-tab-title">{tab.title}</span>
+              </button>
+              <button
+                className="conversation-tab-close"
+                aria-label={`Close ${tab.title}`}
+                title={`Close ${tab.title}`}
+                disabled={running}
+                onClick={() => void closeConversation(tab.id)}
+                type="button"
+              >×</button>
+            </div>
+          })}
+          <button className="conversation-tab-new" aria-label="New conversation tab" title="New conversation" disabled={running} onClick={() => void createSession()} type="button">＋</button>
+        </nav>}
 
         {backendStatus.status === 'failed' && (
           <div className="backend-banner"><div><strong>Runtime did not start</strong><p>{backendStatus.message || 'Microcode could not connect to the local runtime.'} {logsPath && <span>Logs: {logsPath}</span>}</p></div><button className="button-primary" onClick={() => void bridge.retryBackend().catch((error) => setErrorNotice(String(error)))} type="button">Retry backend</button></div>

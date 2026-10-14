@@ -47,20 +47,36 @@ if (($isWorkstation -and $osBuild -lt 26200) -or (-not $isWorkstation -and $osBu
   throw 'Microcode Desktop requires Windows 11 25H2 (build 26200) or Windows Server 2025 (build 26100), x64.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'Microcode.exe') -PathType Leaf)) { throw 'The release package is incomplete: Microcode.exe is missing.' }
-$desktopExecutable = [System.IO.Path]::GetFullPath((Join-Path $installPath 'Microcode.exe'))
-$desktopIsRunning = $false
-foreach ($process in [System.Diagnostics.Process]::GetProcessesByName('Microcode')) {
-  try {
-    if ([string]::Equals([System.IO.Path]::GetFullPath($process.MainModule.FileName), $desktopExecutable, [System.StringComparison]::OrdinalIgnoreCase)) {
-      $desktopIsRunning = $true
+function Get-ProcessesUsingInstallPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $installPrefix = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') + '\'
+  $usingProcesses = [System.Collections.Generic.List[string]]::new()
+  foreach ($process in [System.Diagnostics.Process]::GetProcesses()) {
+    try {
+      $imagePath = $process.MainModule.FileName
+      if ($imagePath) {
+        $fullImagePath = [System.IO.Path]::GetFullPath($imagePath)
+        if ($fullImagePath.StartsWith($installPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $usingProcesses.Add("$($process.ProcessName) (PID $($process.Id))")
+        }
+      }
+    } catch {
+      # Unrelated protected processes may not expose MainModule to a user-scope installer.
+    } finally {
+      $process.Dispose()
     }
-  } catch {
-    # Another process named Microcode can be the CLI, which is independent of the desktop install.
-  } finally {
-    $process.Dispose()
+  }
+  return $usingProcesses.ToArray()
+}
+
+function Assert-InstallPathIsNotInUse {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $usingProcesses = @(Get-ProcessesUsingInstallPath -Path $Path)
+  if ($usingProcesses.Count -gt 0) {
+    throw "Close Microcode Desktop and its terminal sessions before installing or upgrading. Processes using the install folder: $($usingProcesses -join ', ')."
   }
 }
-if ($desktopIsRunning) { throw 'Close Microcode Desktop before installing or upgrading.' }
+Assert-InstallPathIsNotInUse -Path $installPath
 
 $packageRootItem = Get-Item -LiteralPath $packageRoot -Force
 if (($packageRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The release package directory may not be a reparse point.' }
@@ -127,7 +143,14 @@ try {
   Copy-Item -LiteralPath $manifestPath -Destination $stage
   Copy-Item -LiteralPath $manifestHashPath -Destination $stage
 
-  if (Test-Path -LiteralPath $installPath) { Move-Item -LiteralPath $installPath -Destination $backup }
+  Assert-InstallPathIsNotInUse -Path $installPath
+  if (Test-Path -LiteralPath $installPath) {
+    try {
+      Move-Item -LiteralPath $installPath -Destination $backup -ErrorAction Stop
+    } catch {
+      throw "Windows could not replace the existing Microcode installation at '$installPath'. Close Microcode Desktop, its terminal sessions, and any shell using the install folder, then retry. The existing installation was left in place. Windows error: $($_.Exception.Message)"
+    }
+  }
   try { Move-Item -LiteralPath $stage -Destination $installPath }
   catch {
     if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $installPath }
